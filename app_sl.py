@@ -1928,38 +1928,148 @@ def configure_page() -> None:
     st.markdown(
         """
         <style>
+        /* ---- Global layout ---- */
         .block-container {
             max-width: 100%;
-            padding-top: 3.10rem;
-            padding-left: 1.35rem;
-            padding-right: 1.35rem;
-            padding-bottom: 2rem;
+            padding-top: 2.75rem;
+            padding-left: 1.5rem;
+            padding-right: 1.5rem;
+            padding-bottom: 2.5rem;
         }
-        div[data-testid="stTabs"] [role="tablist"] {
-            margin-top: 0rem;
-            gap: 0.35rem;
+
+        /* ---- App header ---- */
+        .app-header {
+            display: flex;
+            align-items: baseline;
+            gap: 0.75rem;
+            margin-bottom: 0.15rem;
         }
-        div[data-testid="stTabs"] button[role="tab"] {
-            padding-top: 0.45rem;
-            padding-bottom: 0.45rem;
+        .app-title {
+            font-weight: 800;
+            font-size: 1.65rem;
+            letter-spacing: -0.02em;
+            line-height: 1;
+            color: inherit;
         }
-        div[data-testid="stButton"] > button {
-            border-radius: 0.30rem;
-            min-height: 2.40rem;
-            white-space: normal;
-            text-align: center;
+        .app-title-sep {
+            font-size: 1.1rem;
+            color: #FF4B4B;
+            opacity: 0.85;
         }
-        div[data-testid="stButton"] > button[kind="primary"] { font-weight: 650; }
+        .app-subtitle {
+            font-size: 0.72rem;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            color: #9ca3af;
+            margin-bottom: 1.1rem;
+            margin-top: 0.1rem;
+        }
+
+        /* ---- Section headings ---- */
         h2 {
             text-align: center;
-            border: 1px solid rgba(49, 51, 63, 0.20);
-            border-radius: 0.30rem;
+            border: 1px solid rgba(255, 75, 75, 0.18);
+            border-radius: 0.35rem;
             padding: 0.55rem 0.75rem;
             margin-top: 0.25rem;
             margin-bottom: 1.00rem;
-            background: rgba(49, 51, 63, 0.04);
+            background: rgba(255, 75, 75, 0.04);
         }
-        .small-muted { color: #6b7280; font-size: 0.88rem; }
+
+        /* ---- Tabs ---- */
+        div[data-testid="stTabs"] [role="tablist"] {
+            margin-top: 0;
+            gap: 0.3rem;
+            border-bottom: 1px solid rgba(255, 75, 75, 0.15);
+            padding-bottom: 0;
+        }
+        div[data-testid="stTabs"] button[role="tab"] {
+            padding: 0.45rem 1.0rem;
+            border-radius: 0.35rem 0.35rem 0 0;
+        }
+        div[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
+            color: #FF4B4B !important;
+            border-bottom: 2px solid #FF4B4B !important;
+        }
+
+        /* ---- Buttons ---- */
+        div[data-testid="stButton"] > button {
+            border-radius: 0.35rem;
+            min-height: 2.5rem;
+            white-space: normal;
+            text-align: center;
+            transition: all 0.15s ease;
+        }
+        div[data-testid="stButton"] > button[kind="primary"] {
+            font-weight: 700;
+            letter-spacing: 0.03em;
+            text-transform: uppercase;
+        }
+        div[data-testid="stButton"] > button[kind="primary"]:not([disabled]):hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(255, 75, 75, 0.35);
+        }
+
+        /* ---- Containers / boxes ---- */
+        div[data-testid="stVerticalBlockBorderWrapper"] {
+            border-radius: 0.45rem !important;
+        }
+
+        /* ---- Expander ---- */
+        div[data-testid="stExpander"] summary {
+            font-weight: 700;
+            font-size: 0.9rem;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }
+
+        /* ---- Captions / muted text ---- */
+        .small-muted {
+            color: #9ca3af;
+            font-size: 0.80rem;
+            line-height: 1.5;
+        }
+        .result-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem 1.2rem;
+            margin-top: 0.6rem;
+        }
+        .result-meta-item {
+            font-size: 0.78rem;
+            color: #9ca3af;
+        }
+        .result-meta-item span {
+            color: #FF4B4B;
+            font-weight: 600;
+        }
+
+        /* ---- Section label pill ---- */
+        .section-pill {
+            display: inline-block;
+            font-size: 0.70rem;
+            font-weight: 600;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            background: rgba(255, 75, 75, 0.10);
+            border: 1px solid rgba(255, 75, 75, 0.22);
+            border-radius: 0.25rem;
+            padding: 0.1rem 0.45rem;
+            color: #FF4B4B;
+            margin-bottom: 0.4rem;
+        }
+
+        /* ---- Advanced params container titles ---- */
+        .param-group-label {
+            font-size: 0.72rem;
+            font-weight: 700;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            color: #9ca3af;
+            margin-bottom: 0.5rem;
+            border-bottom: 1px solid rgba(255, 75, 75, 0.12);
+            padding-bottom: 0.3rem;
+        }
 
         /* ---- Portfolio link row ---- */
         .portfolio-link-row {
@@ -1979,23 +2089,25 @@ def configure_page() -> None:
             align-items: center !important;
             justify-content: center !important;
             height: 2rem !important;
-            border: 1px solid rgba(250, 250, 250, 0.22) !important;
-            border-radius: 0.45rem !important;
+            border: 1px solid rgba(250, 250, 250, 0.18) !important;
+            border-radius: 0.35rem !important;
             color: inherit !important;
             text-decoration: none !important;
-            font-size: 0.80rem !important;
+            font-size: 0.78rem !important;
             font-weight: 600 !important;
             line-height: 1 !important;
-            background: rgba(255, 255, 255, 0.03) !important;
+            background: rgba(255, 255, 255, 0.025) !important;
             white-space: nowrap !important;
             box-sizing: border-box !important;
             overflow: hidden !important;
+            transition: all 0.15s ease !important;
         }
         .portfolio-link:hover {
-            border-color: rgb(255, 75, 75) !important;
-            color: rgb(255, 75, 75) !important;
+            border-color: #FF4B4B !important;
+            color: #FF4B4B !important;
             background: rgba(255, 75, 75, 0.08) !important;
             text-decoration: none !important;
+            transform: translateY(-1px) !important;
         }
         .portfolio-link.icon-only,
         .portfolio-link.icon-only:visited {
@@ -2008,8 +2120,8 @@ def configure_page() -> None:
         }
         .portfolio-icon {
             display: block !important;
-            width: 1.12rem !important; height: 1.12rem !important;
-            min-width: 1.12rem !important; max-width: 1.12rem !important;
+            width: 1.10rem !important; height: 1.10rem !important;
+            min-width: 1.10rem !important; max-width: 1.10rem !important;
             object-fit: contain !important; flex: 0 0 auto !important;
             margin: 0 !important; padding: 0 !important; border: 0 !important;
         }
@@ -2087,7 +2199,7 @@ def set_doc_section(state_key: str, title: str) -> None:
 # ============================================================
 
 def render_image_output(label: str, image: np.ndarray | None, caption: str = "") -> None:
-    st.markdown(f"**{label}**")
+    st.markdown(f'<div class="section-pill">{label}</div>', unsafe_allow_html=True)
     if image is None:
         st.empty()
     else:
@@ -2114,123 +2226,293 @@ def render_documentation_tab(titles: list[str], sections: dict[str, str], state_
 
 
 
-def render_advanced_parameter_controls() -> dict:
+def render_parameter_tabs(
+    waveform_preview: np.ndarray | None,
+    sr_preview: int | None,
+) -> tuple[int, str, str, int, str, dict]:
     """
-    Render advanced controls and return a dictionary consumed by the synthesis pipeline.
+    Render all synthesis parameters as a five-tab panel.
 
-    Each group is placed in its own bordered container so the large Parameters
-    expander remains readable even with many controls exposed.
+    Returns
+    -------
+    target_size     : output image side length in pixels
+    output_mode     : one of OUTPUT_MODE_OPTIONS
+    section_layout  : one of SECTION_LAYOUT_OPTIONS
+    n_sections      : effective section count (1 when layout is None)
+    wavelet_type    : one of WAVELET_OPTIONS
+    params          : advanced parameter dict consumed by the synthesis pipeline
     """
     params: dict = {}
 
-    row1_col1, row1_col2, row1_col3 = st.columns(3, gap="large")
+    (
+        tab_signal,
+        tab_rendering,
+        tab_color,
+        tab_effects,
+        tab_features,
+    ) = st.tabs([
+        "Signal",
+        "Rendering",
+        "Color",
+        "Effects",
+        "Features",
+    ])
 
-    with row1_col1:
-        with st.container(border=True):
-            st.markdown("##### Global rendering")
-            params["robust_lower_percentile"] = st.slider("Normalization lower percentile", 0.0, 10.0, 1.0, 0.5, on_change=clear_results)
-            params["robust_upper_percentile"] = st.slider("Normalization upper percentile", 90.0, 100.0, 99.0, 0.5, on_change=clear_results)
-            params["gamma_correction"] = st.slider("Gamma correction", 0.20, 2.50, 0.85, 0.05, on_change=clear_results)
-            params["contrast_strength"] = st.slider("Contrast strength", 0.20, 3.00, 1.00, 0.05, on_change=clear_results)
-            params["brightness_factor"] = st.slider("Brightness factor", 0.20, 2.50, 1.00, 0.05, on_change=clear_results)
-            params["saturation_factor"] = st.slider("Saturation factor", 0.00, 3.00, 1.00, 0.05, on_change=clear_results)
+    # ── Tab 1 · Signal ────────────────────────────────────────────────────────
+    with tab_signal:
+        sig_left, sig_right = st.columns(2, gap="large")
 
-    with row1_col2:
-        with st.container(border=True):
-            st.markdown("##### Colors / RGB")
-            params["rgb_low_end"] = st.slider("Low-to-mid band limit", 0.10, 0.45, 1.0 / 3.0, 0.01, on_change=clear_results)
-            params["rgb_high_start"] = st.slider("Mid-to-high band limit", 0.55, 0.90, 2.0 / 3.0, 0.01, on_change=clear_results)
-            params["rgb_normalization_mode"] = st.selectbox("RGB normalization", ["Per-channel", "Shared"], index=0, on_change=clear_results)
-            params["rgb_balance_r"] = st.slider("Red channel balance", 0.00, 3.00, 1.00, 0.05, on_change=clear_results)
-            params["rgb_balance_g"] = st.slider("Green channel balance", 0.00, 3.00, 1.00, 0.05, on_change=clear_results)
-            params["rgb_balance_b"] = st.slider("Blue channel balance", 0.00, 3.00, 1.00, 0.05, on_change=clear_results)
+        with sig_left:
+            with st.container(border=True):
+                st.markdown('<div class="param-group-label">Output image</div>', unsafe_allow_html=True)
+                target_size = st.slider(
+                    "Size (px)",
+                    min_value=IMAGE_SIZE_MIN,
+                    max_value=IMAGE_SIZE_MAX,
+                    value=IMAGE_SIZE_DEFAULT,
+                    step=IMAGE_SIZE_STEP,
+                    key="target_size",
+                    on_change=clear_results,
+                )
+                output_mode = st.radio(
+                    "Output mode",
+                    options=OUTPUT_MODE_OPTIONS,
+                    index=4,
+                    key="output_mode",
+                    on_change=clear_results,
+                )
 
-    with row1_col3:
-        with st.container(border=True):
-            st.markdown("##### Black mix")
-            params["ink_class_choice"] = st.selectbox(
-                "Otsu class choice",
-                ["Automatic minority", "Dark class", "Bright class"],
-                index=0,
-                on_change=clear_results,
-            )
-            params["ink_keep_percentile"] = st.slider("Black pixel density in selected class (%)", 1.0, 100.0, 50.0, 1.0, on_change=clear_results)
-            params["ink_smoothing_sigma"] = st.slider("Smoothing before binarization", 0.0, 10.0, 0.0, 0.25, on_change=clear_results)
-            params["ink_thickness"] = st.slider("Black line thickness", 0, 8, 0, 1, on_change=clear_results)
+            with st.container(border=True):
+                st.markdown('<div class="param-group-label">CWT wavelet</div>', unsafe_allow_html=True)
+                wavelet_type = st.selectbox(
+                    "Wavelet",
+                    options=WAVELET_OPTIONS,
+                    index=0,
+                    key="wavelet_type",
+                    on_change=clear_results,
+                    help=(
+                        "Morlet: analytic complex wavelet — contributes both magnitude "
+                        "and instantaneous phase to the Fourier grids.\n"
+                        "Ricker: real-valued wavelet — contributes magnitude only; "
+                        "phase weight is redistributed to the STFT sources."
+                    ),
+                )
 
-    row2_col1, row2_col2, row2_col3 = st.columns(3, gap="large")
+        with sig_right:
+            with st.container(border=True):
+                st.markdown('<div class="param-group-label">Sectioning</div>', unsafe_allow_html=True)
+                section_layout = st.selectbox(
+                    "Layout",
+                    options=SECTION_LAYOUT_OPTIONS,
+                    index=0,
+                    key="section_layout",
+                    on_change=clear_results,
+                    help=(
+                        "Choose how chronological audio sections are combined into "
+                        "the final square image."
+                    ),
+                )
 
-    with row2_col1:
-        with st.container(border=True):
-            st.markdown("##### Luma mix")
-            params["luma_strength"] = st.slider("Luma mix strength", 0.0, 1.0, 1.0, 0.05, on_change=clear_results)
-            params["luma_min_coeff"] = st.slider("Minimum luminance coefficient", 0.0, 1.0, 0.0, 0.05, on_change=clear_results)
-            params["luma_gamma"] = st.slider("Luminance coefficient gamma", 0.20, 3.00, 1.00, 0.05, on_change=clear_results)
-            params["luma_coeff_blur_sigma"] = st.slider("Coefficient blur before multiplication", 0.0, 12.0, 0.0, 0.25, on_change=clear_results)
+                if waveform_preview is None or sr_preview is None:
+                    n_sections = 1
+                    st.info(
+                        "Load an audio file to enable the section slider.",
+                        icon="ℹ️",
+                    )
+                else:
+                    n_samples_preview = len(waveform_preview)
+                    sr_context = int(sr_preview)
+                    k_max = compute_max_sections(n_samples_preview, target_size)
+                    audio_context = (
+                        st.session_state.audio_source,
+                        len(st.session_state.audio_bytes or b""),
+                        int(n_samples_preview),
+                        sr_context,
+                        int(target_size),
+                        int(k_max),
+                    )
 
-    with row2_col2:
-        with st.container(border=True):
-            st.markdown("##### Watershed")
-            params["watershed_marker_spacing"] = st.slider("Marker spacing / region size (px)", 4, 160, 36, 1, on_change=clear_results)
-            params["watershed_gradient_smoothing"] = st.slider("Gradient smoothing", 0.0, 8.0, 1.3, 0.1, on_change=clear_results)
-            params["watershed_region_color_mode"] = st.selectbox(
-                "Region color mode",
-                ["Random pixel", "Mean color", "Median color"],
-                index=0,
-                on_change=clear_results,
-            )
-            params["watershed_random_seed"] = st.number_input("Random seed", min_value=0, max_value=999999, value=12345, step=1, on_change=clear_results)
+                    slider_context = "_".join(
+                        str(item).replace(" ", "_") for item in audio_context
+                    )
+                    n_sections_key = f"n_sections_{slider_context}"
+                    n_sections_default = min(DEFAULT_SECTIONS, k_max)
+                    st.session_state.last_audio_context = audio_context
 
-    with row2_col3:
-        with st.container(border=True):
-            st.markdown("##### Watershed boundary")
-            params["watershed_boundary_style"] = st.selectbox("Boundary style", ["None", "Black", "Local mean"], index=0, on_change=clear_results)
-            params["watershed_boundary_thickness"] = st.slider("Boundary thickness", 0, 8, 0, 1, on_change=clear_results)
-            params["watershed_boundary_mean_window"] = st.slider("Boundary local mean window", 3, 21, 5, 2, on_change=clear_results)
+                    if section_layout == "None":
+                        n_sections = 1
+                        st.slider(
+                            "Number of sections",
+                            min_value=1,
+                            max_value=max(1, k_max),
+                            value=1,
+                            step=1,
+                            key=f"n_sections_disabled_{slider_context}",
+                            disabled=True,
+                            help=(
+                                "Sectioning is disabled when Layout is None. "
+                                "The whole signal produces a single image."
+                            ),
+                        )
+                    else:
+                        n_sections = st.slider(
+                            "Number of sections",
+                            min_value=1,
+                            max_value=k_max,
+                            value=n_sections_default,
+                            step=1,
+                            key=n_sections_key,
+                            on_change=clear_results,
+                            help=(
+                                "The signal is split into chronological sections. "
+                                "Each section generates one block of the final image."
+                            ),
+                        )
 
-    row3_col1, row3_col2 = st.columns(2, gap="large")
+                    st.markdown(
+                        f'<p class="small-muted">'
+                        f'Samples: {n_samples_preview} &nbsp;·&nbsp; '
+                        f'SR: {sr_context} Hz &nbsp;·&nbsp; '
+                        f'Max sections: {k_max}'
+                        f'</p>',
+                        unsafe_allow_html=True,
+                    )
 
-    with row3_col1:
-        with st.container(border=True):
-            st.markdown("##### Magnitude feature weights")
-            mag_col1, mag_col2 = st.columns(2)
-            with mag_col1:
-                params["mag_weight_stft"] = st.slider("STFT magnitude weight", 0.0, 1.0, W_STFT_TOTAL, 0.01, on_change=clear_results)
-                params["mag_weight_cwt"] = st.slider("CWT magnitude weight", 0.0, 1.0, W_CWT_MAG, 0.01, on_change=clear_results)
-                params["mag_weight_mel"] = st.slider("Mel magnitude weight", 0.0, 1.0, W_MEL, 0.01, on_change=clear_results)
-            with mag_col2:
-                params["mag_weight_chroma"] = st.slider("Chroma magnitude weight", 0.0, 1.0, W_CHROMA, 0.01, on_change=clear_results)
-                params["mag_weight_mfcc"] = st.slider("MFCC magnitude weight", 0.0, 1.0, W_MFCC, 0.01, on_change=clear_results)
-                params["mag_weight_rms"] = st.slider("RMS magnitude weight", 0.0, 1.0, W_RMS, 0.01, on_change=clear_results)
+    # ── Tab 2 · Rendering ─────────────────────────────────────────────────────
+    with tab_rendering:
+        ren_left, ren_right = st.columns(2, gap="large")
 
-    with row3_col2:
-        with st.container(border=True):
-            st.markdown("##### Phase feature weights")
-            phase_col1, phase_col2 = st.columns(2)
-            with phase_col1:
-                params["phase_weight_stft_mid"] = st.slider("STFT 1024 phase weight", 0.0, 1.0, W_PHASE_STFT_1024, 0.01, on_change=clear_results)
-                params["phase_weight_stft_fine"] = st.slider("STFT 512 phase weight", 0.0, 1.0, W_PHASE_STFT_512, 0.01, on_change=clear_results)
-                params["phase_weight_cwt"] = st.slider("CWT phase weight", 0.0, 1.0, W_PHASE_CWT, 0.01, on_change=clear_results)
-            with phase_col2:
-                params["phase_weight_onset"] = st.slider("Onset phase weight", 0.0, 1.0, W_PHASE_ONSET, 0.01, on_change=clear_results)
-                params["phase_weight_centroid"] = st.slider("Centroid phase weight", 0.0, 1.0, W_PHASE_CENTROID, 0.01, on_change=clear_results)
-                params["phase_weight_zcr"] = st.slider("ZCR phase weight", 0.0, 1.0, W_PHASE_ZCR, 0.01, on_change=clear_results)
+        with ren_left:
+            with st.container(border=True):
+                st.markdown('<div class="param-group-label">Normalization</div>', unsafe_allow_html=True)
+                params["robust_lower_percentile"] = st.slider(
+                    "Lower percentile", 0.0, 10.0, 1.0, 0.5, on_change=clear_results,
+                )
+                params["robust_upper_percentile"] = st.slider(
+                    "Upper percentile", 90.0, 100.0, 99.0, 0.5, on_change=clear_results,
+                )
 
-    with st.container(border=True):
-        st.markdown("##### Analysis parameters")
-        a_col1, a_col2, a_col3 = st.columns(3, gap="large")
-        fft_options = [256, 512, 1024, 2048, 4096, 8192]
-        with a_col1:
-            params["stft_n_fft_min"] = st.selectbox("STFT minimum window", fft_options, index=0, on_change=clear_results)
-            params["stft_n_fft_max"] = st.selectbox("STFT maximum window", fft_options, index=5, on_change=clear_results)
-        with a_col2:
-            params["cwt_n_scales"] = st.slider("CWT number of scales", 16, 128, CWT_N_SCALES, 4, on_change=clear_results)
-            params["cwt_max_samples"] = st.slider("CWT maximum samples", 4096, 220500, CWT_MAX_SAMPLES, 4096, on_change=clear_results)
-        with a_col3:
-            params["n_mels"] = st.slider("Number of mel bands", 32, 256, N_MELS, 8, on_change=clear_results)
-            params["n_mfcc"] = st.slider("Number of MFCC coefficients", 8, 64, N_MFCC, 1, on_change=clear_results)
+        with ren_right:
+            with st.container(border=True):
+                st.markdown('<div class="param-group-label">Tone</div>', unsafe_allow_html=True)
+                params["gamma_correction"]  = st.slider("Gamma",      0.20, 2.50, 0.85, 0.05, on_change=clear_results)
+                params["contrast_strength"] = st.slider("Contrast",   0.20, 3.00, 1.00, 0.05, on_change=clear_results)
+                params["brightness_factor"] = st.slider("Brightness", 0.20, 2.50, 1.00, 0.05, on_change=clear_results)
+                params["saturation_factor"] = st.slider("Saturation", 0.00, 3.00, 1.00, 0.05, on_change=clear_results)
 
-    return params
+    # ── Tab 3 · Color ─────────────────────────────────────────────────────────
+    with tab_color:
+        col_left, col_right = st.columns(2, gap="large")
+
+        with col_left:
+            with st.container(border=True):
+                st.markdown('<div class="param-group-label">Frequency band splits</div>', unsafe_allow_html=True)
+                params["rgb_low_end"]   = st.slider("Low → mid boundary",  0.10, 0.45, 1.0 / 3.0, 0.01, on_change=clear_results)
+                params["rgb_high_start"] = st.slider("Mid → high boundary", 0.55, 0.90, 2.0 / 3.0, 0.01, on_change=clear_results)
+                params["rgb_normalization_mode"] = st.selectbox(
+                    "RGB normalization", ["Per-channel", "Shared"], index=0, on_change=clear_results,
+                )
+
+        with col_right:
+            with st.container(border=True):
+                st.markdown('<div class="param-group-label">Channel balance</div>', unsafe_allow_html=True)
+                params["rgb_balance_r"] = st.slider("Red",   0.00, 3.00, 1.00, 0.05, on_change=clear_results)
+                params["rgb_balance_g"] = st.slider("Green", 0.00, 3.00, 1.00, 0.05, on_change=clear_results)
+                params["rgb_balance_b"] = st.slider("Blue",  0.00, 3.00, 1.00, 0.05, on_change=clear_results)
+
+    # ── Tab 4 · Effects ───────────────────────────────────────────────────────
+    with tab_effects:
+        eff_left, eff_mid, eff_right = st.columns(3, gap="large")
+
+        with eff_left:
+            with st.container(border=True):
+                st.markdown('<div class="param-group-label">Black mix</div>', unsafe_allow_html=True)
+                params["ink_class_choice"] = st.selectbox(
+                    "Otsu class",
+                    ["Automatic minority", "Dark class", "Bright class"],
+                    index=0,
+                    on_change=clear_results,
+                )
+                params["ink_keep_percentile"]  = st.slider("Pixel density (%)", 1.0, 100.0, 50.0,  1.0,  on_change=clear_results)
+                params["ink_smoothing_sigma"]  = st.slider("Pre-smoothing σ",   0.0,  10.0,  0.0,  0.25, on_change=clear_results)
+                params["ink_thickness"]        = st.slider("Line thickness",     0,      8,    0,    1,   on_change=clear_results)
+
+        with eff_mid:
+            with st.container(border=True):
+                st.markdown('<div class="param-group-label">Luma mix</div>', unsafe_allow_html=True)
+                params["luma_strength"]          = st.slider("Strength",           0.0,  1.0, 1.00, 0.05, on_change=clear_results)
+                params["luma_min_coeff"]         = st.slider("Minimum coefficient", 0.0, 1.0, 0.00, 0.05, on_change=clear_results)
+                params["luma_gamma"]             = st.slider("Coefficient gamma",  0.20, 3.00, 1.00, 0.05, on_change=clear_results)
+                params["luma_coeff_blur_sigma"]  = st.slider("Coefficient blur σ", 0.0, 12.0,  0.0, 0.25, on_change=clear_results)
+
+        with eff_right:
+            with st.container(border=True):
+                st.markdown('<div class="param-group-label">Watershed — regions</div>', unsafe_allow_html=True)
+                params["watershed_marker_spacing"]    = st.slider("Marker spacing (px)", 4, 160, 36, 1,   on_change=clear_results)
+                params["watershed_gradient_smoothing"] = st.slider("Gradient σ",        0.0, 8.0, 1.3, 0.1, on_change=clear_results)
+                params["watershed_region_color_mode"] = st.selectbox(
+                    "Region color",
+                    ["Random pixel", "Mean color", "Median color"],
+                    index=0,
+                    on_change=clear_results,
+                )
+                params["watershed_random_seed"] = st.number_input(
+                    "Random seed", min_value=0, max_value=999999, value=12345, step=1, on_change=clear_results,
+                )
+
+            with st.container(border=True):
+                st.markdown('<div class="param-group-label">Watershed — boundaries</div>', unsafe_allow_html=True)
+                params["watershed_boundary_style"]       = st.selectbox("Style", ["None", "Black", "Local mean"], index=0, on_change=clear_results)
+                params["watershed_boundary_thickness"]   = st.slider("Thickness",    0,  8, 0, 1, on_change=clear_results)
+                params["watershed_boundary_mean_window"] = st.slider("Mean window",  3, 21, 5, 2, on_change=clear_results)
+
+    # ── Tab 5 · Features ──────────────────────────────────────────────────────
+    with tab_features:
+        feat_left, feat_right = st.columns(2, gap="large")
+
+        with feat_left:
+            with st.container(border=True):
+                st.markdown('<div class="param-group-label">Magnitude weights (auto-normalized)</div>', unsafe_allow_html=True)
+                w_col1, w_col2 = st.columns(2)
+                with w_col1:
+                    params["mag_weight_stft"]   = st.slider("STFT",   0.0, 1.0, W_STFT_TOTAL, 0.01, on_change=clear_results)
+                    params["mag_weight_cwt"]    = st.slider("CWT",    0.0, 1.0, W_CWT_MAG,    0.01, on_change=clear_results)
+                    params["mag_weight_mel"]    = st.slider("Mel",    0.0, 1.0, W_MEL,        0.01, on_change=clear_results)
+                with w_col2:
+                    params["mag_weight_chroma"] = st.slider("Chroma", 0.0, 1.0, W_CHROMA,     0.01, on_change=clear_results)
+                    params["mag_weight_mfcc"]   = st.slider("MFCC",   0.0, 1.0, W_MFCC,       0.01, on_change=clear_results)
+                    params["mag_weight_rms"]    = st.slider("RMS",    0.0, 1.0, W_RMS,        0.01, on_change=clear_results)
+
+            with st.container(border=True):
+                st.markdown('<div class="param-group-label">Phase weights (auto-normalized)</div>', unsafe_allow_html=True)
+                p_col1, p_col2 = st.columns(2)
+                with p_col1:
+                    params["phase_weight_stft_mid"]  = st.slider("STFT 1024", 0.0, 1.0, W_PHASE_STFT_1024, 0.01, on_change=clear_results)
+                    params["phase_weight_stft_fine"] = st.slider("STFT 512",  0.0, 1.0, W_PHASE_STFT_512,  0.01, on_change=clear_results)
+                    params["phase_weight_cwt"]       = st.slider("CWT phase", 0.0, 1.0, W_PHASE_CWT,       0.01, on_change=clear_results)
+                with p_col2:
+                    params["phase_weight_onset"]     = st.slider("Onset",     0.0, 1.0, W_PHASE_ONSET,     0.01, on_change=clear_results)
+                    params["phase_weight_centroid"]  = st.slider("Centroid",  0.0, 1.0, W_PHASE_CENTROID,  0.01, on_change=clear_results)
+                    params["phase_weight_zcr"]       = st.slider("ZCR",       0.0, 1.0, W_PHASE_ZCR,       0.01, on_change=clear_results)
+
+        with feat_right:
+            with st.container(border=True):
+                st.markdown('<div class="param-group-label">STFT windows</div>', unsafe_allow_html=True)
+                fft_options = [256, 512, 1024, 2048, 4096, 8192]
+                params["stft_n_fft_min"] = st.selectbox("Minimum N_FFT", fft_options, index=0, on_change=clear_results)
+                params["stft_n_fft_max"] = st.selectbox("Maximum N_FFT", fft_options, index=5, on_change=clear_results)
+
+            with st.container(border=True):
+                st.markdown('<div class="param-group-label">CWT analysis</div>', unsafe_allow_html=True)
+                params["cwt_n_scales"]    = st.slider("Number of scales",  16, 128,    CWT_N_SCALES,    4,    on_change=clear_results)
+                params["cwt_max_samples"] = st.slider("Maximum samples", 4096, 220500, CWT_MAX_SAMPLES, 4096, on_change=clear_results)
+
+            with st.container(border=True):
+                st.markdown('<div class="param-group-label">Mel / MFCC</div>', unsafe_allow_html=True)
+                params["n_mels"] = st.slider("Mel bands",       32, 256, N_MELS, 8, on_change=clear_results)
+                params["n_mfcc"] = st.slider("MFCC coefficients", 8,  64, N_MFCC, 1, on_change=clear_results)
+
+    return target_size, output_mode, section_layout, n_sections, wavelet_type, params
 
 
 # ============================================================
@@ -2241,6 +2523,17 @@ def render_app_tab() -> None:
     if not LIBROSA_AVAILABLE:
         st.error("librosa is not installed. Please add `librosa` to requirements.txt.")
         return
+
+    # --------------------------------------------------------
+    # Header
+    # --------------------------------------------------------
+    st.markdown(
+        '<div class="app-header">'
+        '<span class="app-title">Audio Visualization</span>'        
+        '</div>'
+        '<div class="app-subtitle">Spectral feature extraction · 2D Fourier synthesis · Inverse transform</div>',
+        unsafe_allow_html=True,
+    )
 
     # --------------------------------------------------------
     # Initialise default audio bytes only when the default source is selected
@@ -2263,7 +2556,7 @@ def render_app_tab() -> None:
             waveform_preview, sr_preview = None, None
 
     # ========================================================
-    # Row 1: input box + run button, output image + download
+    # Row 1: input box + run button  |  output image
     # ========================================================
     input_col, output_col = st.columns([1.0, 1.35], gap="large")
 
@@ -2288,11 +2581,13 @@ def render_app_tab() -> None:
                         st.session_state.last_audio_context = None
                         st.session_state.results = None
                         st.rerun()
-                    st.caption(f"Default sample: {DEFAULT_AUDIO_TITLE} — {DEFAULT_AUDIO_DESCRIPTION}")
+                    st.caption(f"**{DEFAULT_AUDIO_TITLE}** — {DEFAULT_AUDIO_DESCRIPTION}")
                     st.audio(def_bytes)
                     if waveform_preview is not None:
-                        st.markdown("##### Waveform")
+                        st.markdown('<div class="section-pill">Waveform</div>', unsafe_allow_html=True)
                         st.image(waveform_to_display_image(waveform_preview), width="stretch")
+                        st.markdown('<div class="section-pill">Spectrogram</div>', unsafe_allow_html=True)
+                        st.image(spectrogram_to_display_image(waveform_preview), width="stretch")
                 else:
                     st.error("The default audio sample could not be loaded.")
                     st.session_state.audio_bytes = None
@@ -2313,6 +2608,11 @@ def render_app_tab() -> None:
                         st.session_state.results = None
                         st.rerun()
                     st.audio(uploaded_bytes)
+                    if waveform_preview is not None:
+                        st.markdown('<div class="section-pill">Waveform</div>', unsafe_allow_html=True)
+                        st.image(waveform_to_display_image(waveform_preview), width="stretch")
+                        st.markdown('<div class="section-pill">Spectrogram</div>', unsafe_allow_html=True)
+                        st.image(spectrogram_to_display_image(waveform_preview), width="stretch")
                 else:
                     st.info("Upload an audio file to use a personal signal.")
                     st.session_state.audio_bytes = None
@@ -2334,8 +2634,10 @@ def render_app_tab() -> None:
                             st.rerun()
                         st.audio(recorded_bytes)
                         if waveform_preview is not None:
-                            st.markdown("##### Waveform")
+                            st.markdown('<div class="section-pill">Waveform</div>', unsafe_allow_html=True)
                             st.image(waveform_to_display_image(waveform_preview), width="stretch")
+                            st.markdown('<div class="section-pill">Spectrogram</div>', unsafe_allow_html=True)
+                            st.image(spectrogram_to_display_image(waveform_preview), width="stretch")
                     else:
                         st.info("Record an audio signal with your microphone.")
                         st.session_state.audio_bytes = None
@@ -2346,7 +2648,7 @@ def render_app_tab() -> None:
                     st.session_state.using_default = False
 
         st.button(
-            "Run",
+            "▶  Generate image",
             type="primary",
             width="stretch",
             disabled=(st.session_state.audio_bytes is None or st.session_state.run_in_progress),
@@ -2360,154 +2662,75 @@ def render_app_tab() -> None:
         if st.session_state.last_run_status == "Done":
             progress_status_placeholder.success("Done — 100%")
 
-        output_box = st.container(border=True)
-        with output_box:
-            st.markdown("#### Output image")
-            output_placeholder = st.empty()
-            download_placeholder = st.empty()
+        results = st.session_state.results
 
-            results = st.session_state.results
-            if results is None:
-                output_placeholder.info("Generated image will appear here after you click **Run**.")
-            else:
-                with output_placeholder.container():
-                    render_image_output("Generated image", results["generated_image"])
-                with download_placeholder.container():
-                    st.download_button(
-                        "Download image (PNG)",
-                        data=results["png_bytes"],
-                        file_name="output.png",
-                        mime="image/png",
-                        width="stretch",
-                    )
+        if results is None:
+            with st.container(border=True):
+                st.markdown("#### Output image")
+                st.info("Generated image will appear here after you click **▶ Generate image**.")
+        else:
+            # ---- Main output image ----
+            with st.container(border=True):
+                st.markdown("#### Output image")
+                render_image_output("Generated image", results["generated_image"])
+
+                # Metadata row
+                dur = results["duration"]
+                meta_html = (
+                    '<div class="result-meta">'
+                    f'<div class="result-meta-item">Duration <span>{dur:.2f} s</span></div>'
+                    f'<div class="result-meta-item">SR <span>{results["sr"]} Hz</span></div>'
+                    f'<div class="result-meta-item">Samples <span>{results["n_samples"]}</span></div>'
+                    f'<div class="result-meta-item">Sections <span>{results["n_sections"]}</span></div>'
+                    f'<div class="result-meta-item">Layout <span>{results["section_layout"]}</span></div>'
+                    f'<div class="result-meta-item">Mode <span>{results["output_mode"]}</span></div>'
+                    '</div>'
+                )
+                st.markdown(meta_html, unsafe_allow_html=True)
+                st.markdown("")  # spacer
+
+                st.download_button(
+                    "⬇  Download PNG",
+                    data=results["png_bytes"],
+                    file_name="audio_image.png",
+                    mime="image/png",
+                    width="stretch",
+                )
+
+            # ---- 2D Fourier representation of output image ----
+            with st.container(border=True):
+                st.markdown("#### 2D Fourier representation")
+                st.caption(
+                    "Centered log-magnitude (viridis) and phase (twilight) of the "
+                    "2D DFT of the output image's luminance channel."
+                )
+                fourier_col1, fourier_col2 = st.columns(2, gap="small")
+                mag_img, phase_img = output_image_fourier_to_display_images(results["generated_image"])
+                with fourier_col1:
+                    render_image_output("Magnitude  log|F(u,v)|", mag_img)
+                with fourier_col2:
+                    render_image_output("Phase  ∠F(u,v)", phase_img)
 
     # ========================================================
     # Row 2: parameters box
     # ========================================================
-    with st.expander("Parameters", expanded=False):
-
-        p_top_1, p_top_2, p_top_3 = st.columns([1.0, 1.0, 1.0], gap="large")
-
-        with p_top_1:
-            target_size = st.slider(
-                "Output image size (px)",
-                min_value=IMAGE_SIZE_MIN,
-                max_value=IMAGE_SIZE_MAX,
-                value=IMAGE_SIZE_DEFAULT,
-                step=IMAGE_SIZE_STEP,
-                key="target_size",
-                on_change=clear_results,
-            )
-
-        with p_top_2:
-            output_mode = st.radio(
-                "Output mode",
-                options=OUTPUT_MODE_OPTIONS,
-                index=4,
-                key="output_mode",
-                horizontal=True,
-                on_change=clear_results,
-            )
-
-        with p_top_3:
-            section_layout = st.selectbox(
-                "Section layout",
-                options=SECTION_LAYOUT_OPTIONS,
-                index=0,
-                key="section_layout",
-                on_change=clear_results,
-                help=(
-                    "Choose how chronological audio sections are combined into "
-                    "the final square image."
-                ),
-            )
-
-        p_mid_1, p_mid_2 = st.columns([1.0, 1.0], gap="large")
-
-        with p_mid_1:
-            if waveform_preview is None or sr_preview is None:
-                n_sections = 1
-                st.info(
-                    "Choose the default sample, upload an audio file, or record audio "
-                    "to enable the section slider."
-                )
-            else:
-                n_samples_preview = len(waveform_preview)
-                sr_context = int(sr_preview)
-                k_max = compute_max_sections(n_samples_preview, target_size)
-                audio_context = (
-                    st.session_state.audio_source,
-                    len(st.session_state.audio_bytes or b""),
-                    int(n_samples_preview),
-                    sr_context,
-                    int(target_size),
-                    int(k_max),
-                )
-
-                # Streamlit keeps widget values in session state. When the input
-                # signal changes, k_max can become smaller than the previous slider
-                # value. Using a context-dependent key recreates the slider safely
-                # and prevents the "value outside bounds" exception.
-                slider_context = "_".join(str(item).replace(" ", "_") for item in audio_context)
-                n_sections_key = f"n_sections_{slider_context}"
-                n_sections_default = min(DEFAULT_SECTIONS, k_max)
-                st.session_state.last_audio_context = audio_context
-
-                if section_layout == "None":
-                    n_sections = 1
-                    st.slider(
-                        "Number of sections",
-                        min_value=1,
-                        max_value=max(1, k_max),
-                        value=1,
-                        step=1,
-                        key=f"n_sections_disabled_{slider_context}",
-                        disabled=True,
-                        help=(
-                            "Sectioning is disabled when Section layout is set to None. "
-                            "The whole signal is used to generate a single image."
-                        ),
-                    )
-                else:
-                    n_sections = st.slider(
-                        "Number of sections",
-                        min_value=1,
-                        max_value=k_max,
-                        value=n_sections_default,
-                        step=1,
-                        key=n_sections_key,
-                        on_change=clear_results,
-                        help=(
-                            "The signal is split into chronological sections. Each section "
-                            "generates one visible block of the final image. The maximum "
-                            "depends on the number of samples and the output image size."
-                        ),
-                    )
-
-                st.caption(
-                    f"Samples: {n_samples_preview} · SR: {sr_context} Hz · "
-                    f"Dynamic maximum sections: {k_max}"
-                )
-
-        with p_mid_2:
-            wavelet_type = st.selectbox(
-                "CWT wavelet",
-                options=WAVELET_OPTIONS,
-                index=0,
-                key="wavelet_type",
-                on_change=clear_results,
-                help=(
-                    "Morlet: analytic complex wavelet — contributes both magnitude "
-                    "and instantaneous phase to the Fourier grids.\n"
-                    "Ricker: real-valued wavelet — contributes magnitude only; "
-                    "phase weight is redistributed to the STFT sources."
-                ),
-            )
-
-        synthesis_params = render_advanced_parameter_controls()
+    with st.expander("⚙  Parameters", expanded=False):
+        (
+            target_size,
+            output_mode,
+            section_layout,
+            n_sections,
+            wavelet_type,
+            synthesis_params,
+        ) = render_parameter_tabs(waveform_preview, sr_preview)
 
     if "synthesis_params" not in locals():
         synthesis_params = {}
+        target_size = IMAGE_SIZE_DEFAULT
+        output_mode = OUTPUT_MODE_OPTIONS[4]
+        section_layout = SECTION_LAYOUT_OPTIONS[0]
+        n_sections = 1
+        wavelet_type = WAVELET_OPTIONS[0]
 
     # ========================================================
     # Run computation
