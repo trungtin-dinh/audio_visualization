@@ -131,7 +131,7 @@ W_PHASE_ZCR:       float = 0.05
 # Ricker total (redistribute CWT weight 0.20 to STFT): 0.40+0.30+0+0.15+0.10+0.05 = 1.00
 
 WAVELET_OPTIONS     = ["Morlet", "Ricker (Mexican hat)"]
-OUTPUT_MODE_OPTIONS = ["Grayscale", "Colors"]
+OUTPUT_MODE_OPTIONS = ["Grayscale", "Colors", "Colors + black drawing"]
 SECTION_LAYOUT_OPTIONS = [
     "None",
     "Chronological treemap",
@@ -1333,6 +1333,124 @@ def finalize_sectioned_image(canvas_float: np.ndarray, output_mode: str) -> np.n
     return (image * 255.0).round().astype(np.uint8)
 
 
+
+
+def otsu_threshold_unit(values: np.ndarray) -> float:
+    """
+    Compute Otsu's threshold on values normalized to [0, 1].
+
+    This local implementation avoids adding scikit-image as a dependency.
+    """
+    arr = np.asarray(values, dtype=np.float64)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return 0.5
+
+    arr = np.clip(arr, 0.0, 1.0)
+    if arr.max() <= arr.min():
+        return float(arr.min())
+
+    hist, bin_edges = np.histogram(arr, bins=256, range=(0.0, 1.0))
+    hist = hist.astype(np.float64)
+    total = hist.sum()
+    if total <= 0:
+        return 0.5
+
+    prob = hist / total
+    centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+    omega = np.cumsum(prob)
+    mu = np.cumsum(prob * centers)
+    mu_total = mu[-1]
+
+    denom = omega * (1.0 - omega)
+    between_class_variance = np.zeros_like(centers)
+    valid = denom > 1e-12
+    between_class_variance[valid] = ((mu_total * omega[valid] - mu[valid]) ** 2) / denom[valid]
+
+    return float(centers[int(np.argmax(between_class_variance))])
+
+
+def apply_black_drawing_from_grayscale(color_image: np.ndarray, grayscale_image: np.ndarray) -> np.ndarray:
+    """
+    Use a grayscale-generated image as a sparse binary drawing mask over a color image.
+
+    Step 1:
+        The grayscale image is binarized by Otsu's method.
+
+    Step 2:
+        Between the two Otsu classes, the minority class is selected as the
+        candidate drawing layer.
+
+    Step 3:
+        The candidate class is split again by its own median gray value, so
+        approximately half of the candidate pixels are discarded. The preserved
+        half is the more extreme side of the original histogram:
+            - if the low Otsu class is the minority, keep only its darker half;
+            - if the high Otsu class is the minority, keep only its brighter half.
+
+    The final sparse mask is rendered in black on top of the color image.
+    """
+    color = np.asarray(color_image, dtype=np.uint8).copy()
+    gray_rgb = np.asarray(grayscale_image, dtype=np.float64)
+
+    if gray_rgb.ndim == 3:
+        gray = 0.299 * gray_rgb[:, :, 0] + 0.587 * gray_rgb[:, :, 1] + 0.114 * gray_rgb[:, :, 2]
+    else:
+        gray = gray_rgb
+
+    gray = normalize_to_unit(gray)
+    threshold = otsu_threshold_unit(gray)
+    low_mask = gray <= threshold
+    high_mask = gray > threshold
+
+    low_count = int(np.count_nonzero(low_mask))
+    high_count = int(np.count_nonzero(high_mask))
+
+    if low_count == 0 and high_count == 0:
+        return color
+    if low_count == 0:
+        candidate_mask = high_mask
+        keep_high_extreme = True
+    elif high_count == 0:
+        candidate_mask = low_mask
+        keep_high_extreme = False
+    elif low_count <= high_count:
+        candidate_mask = low_mask
+        keep_high_extreme = False
+    else:
+        candidate_mask = high_mask
+        keep_high_extreme = True
+
+    candidate_values = gray[candidate_mask]
+    if candidate_values.size == 0:
+        return color
+
+    # Split the selected Otsu class into two parts with approximately equal
+    # pixel counts. This keeps only half of the original black drawing pixels.
+    second_threshold = float(np.median(candidate_values))
+    if keep_high_extreme:
+        drawing_mask = candidate_mask & (gray >= second_threshold)
+    else:
+        drawing_mask = candidate_mask & (gray <= second_threshold)
+
+    # Degenerate fallback: if the selected class is constant, median splitting
+    # may keep all pixels. In that case, keep exactly the most extreme half by
+    # rank, while preserving the intended dark/bright side.
+    if np.count_nonzero(drawing_mask) >= candidate_values.size:
+        candidate_indices = np.flatnonzero(candidate_mask.ravel())
+        candidate_gray = gray.ravel()[candidate_indices]
+        n_keep = max(1, candidate_indices.size // 2)
+        if keep_high_extreme:
+            keep_local = np.argpartition(candidate_gray, -n_keep)[-n_keep:]
+        else:
+            keep_local = np.argpartition(candidate_gray, n_keep - 1)[:n_keep]
+        drawing_flat = np.zeros(gray.size, dtype=bool)
+        drawing_flat[candidate_indices[keep_local]] = True
+        drawing_mask = drawing_flat.reshape(gray.shape)
+
+    color[drawing_mask] = 0
+    return color
+
 def build_layout_index_map(target_size: int, n_sections: int, section_layout: str) -> np.ndarray | None:
     """
     Build a dense section-index map for mask-based layouts.
@@ -1411,6 +1529,40 @@ def generate_sectioned_image(
     """
     target_size = int(target_size)
     n_sections = max(1, int(n_sections))
+
+    if output_mode == "Colors + black drawing":
+        total_steps = 2 if section_layout == "None" else 2 * n_sections
+
+        def color_progress(done: int, total: int) -> None:
+            if progress_callback is not None:
+                progress_callback(done, total_steps)
+
+        def grayscale_progress(done: int, total: int) -> None:
+            if progress_callback is not None:
+                progress_callback(total + done, total_steps)
+
+        color_image = generate_sectioned_image(
+            waveform=waveform,
+            sr=sr,
+            target_size=target_size,
+            output_mode="Colors",
+            wavelet_type=wavelet_type,
+            n_sections=n_sections,
+            section_layout=section_layout,
+            progress_callback=color_progress,
+        )
+        grayscale_image = generate_sectioned_image(
+            waveform=waveform,
+            sr=sr,
+            target_size=target_size,
+            output_mode="Grayscale",
+            wavelet_type=wavelet_type,
+            n_sections=n_sections,
+            section_layout=section_layout,
+            progress_callback=grayscale_progress,
+        )
+        return apply_black_drawing_from_grayscale(color_image, grayscale_image)
+
     section_layout = section_layout if section_layout in SECTION_LAYOUT_OPTIONS else "None"
 
     if section_layout == "None":
@@ -1875,7 +2027,7 @@ def render_app_tab() -> None:
             output_mode = st.radio(
                 "Output mode",
                 options=OUTPUT_MODE_OPTIONS,
-                index=1,
+                index=2,
                 key="output_mode",
                 horizontal=True,
                 on_change=clear_results,
