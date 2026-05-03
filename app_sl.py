@@ -36,7 +36,7 @@ except Exception:
 # Constants
 # ============================================================
 
-# DEFAULT_AUDIO_SR = 22 050 Hz: standard mono sample rate. The Nyquist
+# DEFAULT_AUDIO_SR = 22_050 Hz: standard mono sample rate. The Nyquist
 # frequency sr/2 = 11 025 Hz covers the full perceptual range of music and
 # speech. Higher rates (e.g. 44 100 Hz) would double memory usage and
 # compute time with no audible benefit after downmixing to mono.
@@ -91,8 +91,8 @@ N_MFCC: int = 20
 
 # Image geometry
 IMAGE_SIZE_MIN:     int = 64
-IMAGE_SIZE_MAX:     int = 512
-IMAGE_SIZE_DEFAULT: int = 256
+IMAGE_SIZE_MAX:     int = 1024
+IMAGE_SIZE_DEFAULT: int = 512
 # IMAGE_SIZE_STEP = 16: step of 16 keeps all sizes divisible by 16,
 # which aligns with typical GPU/SIMD tile widths and ensures symmetric
 # Hermitian indices (N//2 is always an integer).
@@ -131,7 +131,7 @@ W_PHASE_ZCR:       float = 0.05
 # Ricker total (redistribute CWT weight 0.20 to STFT): 0.40+0.30+0+0.15+0.10+0.05 = 1.00
 
 WAVELET_OPTIONS     = ["Morlet", "Ricker (Mexican hat)"]
-OUTPUT_MODE_OPTIONS = ["Grayscale", "Colors", "Colors + black drawing", "Mix"]
+OUTPUT_MODE_OPTIONS = ["Grayscale", "Colors", "Black mix", "Luma mix", "Watershed"]
 SECTION_LAYOUT_OPTIONS = [
     "None",
     "Chronological treemap",
@@ -1480,6 +1480,140 @@ def apply_grayscale_mix_to_color(color_image: np.ndarray, grayscale_image: np.nd
     return np.clip(mixed, 0.0, 255.0).round().astype(np.uint8)
 
 
+
+def watershed_flood_from_markers(gradient: np.ndarray, markers: np.ndarray) -> np.ndarray:
+    """
+    Lightweight marker-controlled watershed implemented with NumPy + heapq.
+
+    The gradient image is interpreted as a topographic surface. Marker labels
+    are flooded outward in order of increasing accumulated gradient cost.
+    """
+    import heapq
+
+    gradient = np.asarray(gradient, dtype=np.float64)
+    markers = np.asarray(markers, dtype=np.int32)
+    h, w = gradient.shape
+
+    labels = markers.copy()
+    heap: list[tuple[float, int, int, int]] = []
+
+    marker_positions = np.argwhere(markers > 0)
+    for y, x in marker_positions:
+        lab = int(markers[y, x])
+        heapq.heappush(heap, (float(gradient[y, x]), int(y), int(x), lab))
+
+    neighbors = [
+        (-1, 0), (1, 0), (0, -1), (0, 1),
+        (-1, -1), (-1, 1), (1, -1), (1, 1),
+    ]
+
+    while heap:
+        cost, y, x, lab = heapq.heappop(heap)
+        if labels[y, x] != lab:
+            continue
+
+        for dy, dx in neighbors:
+            yy = y + dy
+            xx = x + dx
+            if yy < 0 or yy >= h or xx < 0 or xx >= w:
+                continue
+
+            if labels[yy, xx] == 0:
+                labels[yy, xx] = lab
+                new_cost = max(cost, float(gradient[yy, xx]))
+                heapq.heappush(heap, (new_cost, yy, xx, lab))
+
+    return labels
+
+
+def make_watershed_region_image(image_rgb: np.ndarray) -> np.ndarray:
+    """
+    Convert an RGB image into a watershed-like region image.
+
+    The input image is segmented into regions using a marker-controlled
+    watershed on the smoothed luminance gradient. Each region is then filled
+    with the color of one deterministic pseudo-random pixel sampled inside
+    that same region. Region boundaries are drawn in black.
+    """
+    image = np.asarray(image_rgb, dtype=np.uint8)
+    if image.ndim != 3 or image.shape[2] != 3:
+        image = np.stack([image, image, image], axis=2).astype(np.uint8)
+
+    h, w = image.shape[:2]
+    n = max(h, w)
+
+    gray = (
+        0.299 * image[:, :, 0].astype(np.float64)
+        + 0.587 * image[:, :, 1].astype(np.float64)
+        + 0.114 * image[:, :, 2].astype(np.float64)
+    )
+    gray = normalize_to_unit(gray)
+
+    # Smooth first so the watershed reacts to broad image structures rather
+    # than to every tiny RGB fluctuation.
+    smooth_sigma = max(0.8, n / 384.0)
+    gray_smooth = scipy.ndimage.gaussian_filter(gray, sigma=smooth_sigma)
+
+    grad_x = scipy.ndimage.sobel(gray_smooth, axis=1)
+    grad_y = scipy.ndimage.sobel(gray_smooth, axis=0)
+    gradient = normalize_to_unit(np.hypot(grad_x, grad_y))
+
+    # Marker placement: divide the image into cells and place one marker at
+    # the minimum-gradient pixel of each cell. This gives a stable, dependency-
+    # free watershed-like partition without adding scikit-image.
+    cell_size = max(12, int(round(n / 14.0)))
+    markers = np.zeros((h, w), dtype=np.int32)
+    label = 1
+
+    for y0 in range(0, h, cell_size):
+        y1 = min(h, y0 + cell_size)
+        for x0 in range(0, w, cell_size):
+            x1 = min(w, x0 + cell_size)
+            sub = gradient[y0:y1, x0:x1]
+            if sub.size == 0:
+                continue
+            yy, xx = np.unravel_index(int(np.argmin(sub)), sub.shape)
+            markers[y0 + yy, x0 + xx] = label
+            label += 1
+
+    labels = watershed_flood_from_markers(gradient, markers)
+
+    # Fill each watershed region with the color of one deterministic
+    # pseudo-random pixel from that same region.
+    rng = np.random.default_rng(12345)
+    out = np.zeros_like(image, dtype=np.uint8)
+
+    for lab in range(1, int(labels.max()) + 1):
+        ys, xs = np.where(labels == lab)
+        if ys.size == 0:
+            continue
+        idx = int(rng.integers(0, ys.size))
+        sampled_color = image[ys[idx], xs[idx]]
+        out[ys, xs] = sampled_color
+
+    # Draw black contours between neighboring regions.
+    boundary = np.zeros((h, w), dtype=bool)
+    boundary[:, 1:] |= labels[:, 1:] != labels[:, :-1]
+    boundary[:, :-1] |= labels[:, 1:] != labels[:, :-1]
+    boundary[1:, :] |= labels[1:, :] != labels[:-1, :]
+    boundary[:-1, :] |= labels[1:, :] != labels[:-1, :]
+
+    # Slightly thicken the contours so they remain visible after display scaling.
+    #boundary = scipy.ndimage.binary_dilation(boundary, iterations=max(1, n // 256))
+    #boundary = scipy.ndimage.binary_dilation(boundary, iterations=1)
+    #out[boundary] = 0
+    #local_mean = np.stack(
+    #    [
+    #        scipy.ndimage.uniform_filter(out[:, :, c].astype(np.float64), size=5, mode="nearest")
+    #        for c in range(3)
+    #    ],
+    #    axis=2,
+    #)
+    #out[boundary] = np.clip(local_mean[boundary], 0, 255).round().astype(np.uint8)
+
+    return out
+
+
 def build_layout_index_map(target_size: int, n_sections: int, section_layout: str) -> np.ndarray | None:
     """
     Build a dense section-index map for mask-based layouts.
@@ -1559,7 +1693,7 @@ def generate_sectioned_image(
     target_size = int(target_size)
     n_sections = max(1, int(n_sections))
 
-    if output_mode in {"Colors + black drawing", "Mix"}:
+    if output_mode in {"Black mix", "Luma mix", "Watershed"}:
         total_steps = 2 if section_layout == "None" else 2 * n_sections
 
         def color_progress(done: int, total: int) -> None:
@@ -1591,10 +1725,15 @@ def generate_sectioned_image(
             progress_callback=grayscale_progress,
         )
 
-        if output_mode == "Colors + black drawing":
+        if output_mode == "Black mix":
             return apply_black_drawing_from_grayscale(color_image, grayscale_image)
 
-        return apply_grayscale_mix_to_color(color_image, grayscale_image)
+        mixed_image = apply_grayscale_mix_to_color(color_image, grayscale_image)
+
+        if output_mode == "Luma mix":
+            return mixed_image
+
+        return make_watershed_region_image(mixed_image)
 
     section_layout = section_layout if section_layout in SECTION_LAYOUT_OPTIONS else "None"
 
@@ -2060,7 +2199,7 @@ def render_app_tab() -> None:
             output_mode = st.radio(
                 "Output mode",
                 options=OUTPUT_MODE_OPTIONS,
-                index=3,
+                index=4,
                 key="output_mode",
                 horizontal=True,
                 on_change=clear_results,
