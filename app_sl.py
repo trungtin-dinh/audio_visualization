@@ -131,7 +131,7 @@ W_PHASE_ZCR:       float = 0.05
 # Ricker total (redistribute CWT weight 0.20 to STFT): 0.40+0.30+0+0.15+0.10+0.05 = 1.00
 
 WAVELET_OPTIONS     = ["Morlet", "Ricker (Mexican hat)"]
-OUTPUT_MODE_OPTIONS = ["Grayscale", "Colors", "Colors + black drawing"]
+OUTPUT_MODE_OPTIONS = ["Grayscale", "Colors", "Colors + black drawing", "Mix"]
 SECTION_LAYOUT_OPTIONS = [
     "None",
     "Chronological treemap",
@@ -1451,6 +1451,35 @@ def apply_black_drawing_from_grayscale(color_image: np.ndarray, grayscale_image:
     color[drawing_mask] = 0
     return color
 
+
+def apply_grayscale_mix_to_color(color_image: np.ndarray, grayscale_image: np.ndarray) -> np.ndarray:
+    """
+    Use a grayscale-generated image as a multiplicative coefficient map over a color image.
+
+    The color image provides the RGB base. The grayscale image is converted to
+    a coefficient field C(x, y) in [0, 1], then each color channel is multiplied
+    by this same coefficient:
+
+        R_out = C · R
+        G_out = C · G
+        B_out = C · B
+
+    This keeps the chromatic structure from the Colors mode while using the
+    grayscale reconstruction as a luminance/contrast modulation.
+    """
+    color = np.asarray(color_image, dtype=np.float64)
+    gray_rgb = np.asarray(grayscale_image, dtype=np.float64)
+
+    if gray_rgb.ndim == 3:
+        gray = 0.299 * gray_rgb[:, :, 0] + 0.587 * gray_rgb[:, :, 1] + 0.114 * gray_rgb[:, :, 2]
+    else:
+        gray = gray_rgb
+
+    coeff = normalize_to_unit(gray)
+    mixed = color * coeff[:, :, None]
+    return np.clip(mixed, 0.0, 255.0).round().astype(np.uint8)
+
+
 def build_layout_index_map(target_size: int, n_sections: int, section_layout: str) -> np.ndarray | None:
     """
     Build a dense section-index map for mask-based layouts.
@@ -1530,7 +1559,7 @@ def generate_sectioned_image(
     target_size = int(target_size)
     n_sections = max(1, int(n_sections))
 
-    if output_mode == "Colors + black drawing":
+    if output_mode in {"Colors + black drawing", "Mix"}:
         total_steps = 2 if section_layout == "None" else 2 * n_sections
 
         def color_progress(done: int, total: int) -> None:
@@ -1561,7 +1590,11 @@ def generate_sectioned_image(
             section_layout=section_layout,
             progress_callback=grayscale_progress,
         )
-        return apply_black_drawing_from_grayscale(color_image, grayscale_image)
+
+        if output_mode == "Colors + black drawing":
+            return apply_black_drawing_from_grayscale(color_image, grayscale_image)
+
+        return apply_grayscale_mix_to_color(color_image, grayscale_image)
 
     section_layout = section_layout if section_layout in SECTION_LAYOUT_OPTIONS else "None"
 
@@ -2027,7 +2060,7 @@ def render_app_tab() -> None:
             output_mode = st.radio(
                 "Output mode",
                 options=OUTPUT_MODE_OPTIONS,
-                index=2,
+                index=3,
                 key="output_mode",
                 horizontal=True,
                 on_change=clear_results,
