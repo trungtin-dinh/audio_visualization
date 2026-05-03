@@ -364,28 +364,24 @@ def load_audio(audio_bytes: bytes) -> tuple[np.ndarray | None, int | None]:
 # Multi-resolution STFT window sizes
 # ============================================================
 
-def get_stft_resolutions(n_samples: int) -> list[int]:
+def get_stft_resolutions(n_samples: int, params: dict | None = None) -> list[int]:
     """
-    Return all powers-of-two STFT window sizes between STFT_N_FFT_MIN and
-    min(STFT_N_FFT_MAX, n_samples // 2).
-
-    The upper cap ensures at least two non-overlapping frames exist in the
-    signal (n_fft ≤ n_samples / 2 guarantees T ≥ 2 frames with default
-    hop = n_fft // 4, giving T ≈ 4n_samples / n_fft ≥ 8).
-
-    Parameters:
-        n_samples: number of audio samples in the waveform
-
-    Returns:
-        list of valid n_fft values (ascending), never empty
+    Return valid powers-of-two STFT window sizes under user-controlled bounds.
     """
-    upper = min(STFT_N_FFT_MAX, max(STFT_N_FFT_MIN, n_samples // 2))
+    stft_min = int(get_param(params, "stft_n_fft_min", STFT_N_FFT_MIN))
+    stft_max = int(get_param(params, "stft_n_fft_max", STFT_N_FFT_MAX))
+
+    stft_min = int(2 ** round(np.log2(max(64, stft_min))))
+    stft_max = int(2 ** round(np.log2(max(stft_min, stft_max))))
+
+    upper = min(stft_max, max(stft_min, n_samples // 2))
     resolutions = [
         2 ** k
-        for k in range(8, 14)   # 2^8=256 … 2^13=8192
-        if STFT_N_FFT_MIN <= 2 ** k <= upper
+        for k in range(6, 15)   # 64 … 16384, then filtered by user limits
+        if stft_min <= 2 ** k <= upper
     ]
-    return resolutions if resolutions else [STFT_N_FFT_MIN]
+    return resolutions if resolutions else [stft_min]
+
 
 
 
@@ -453,7 +449,7 @@ def cwt_compat(data: np.ndarray, wavelet_fn, widths: np.ndarray) -> np.ndarray:
 # Feature extraction
 # ============================================================
 
-def extract_features(waveform: np.ndarray, sr: int, wavelet_type: str = "Morlet") -> dict:
+def extract_features(waveform: np.ndarray, sr: int, wavelet_type: str = "Morlet", params: dict | None = None) -> dict:
     """
     Extract a comprehensive feature set from a mono waveform.
 
@@ -522,7 +518,7 @@ def extract_features(waveform: np.ndarray, sr: int, wavelet_type: str = "Morlet"
     hop_default = 256   # shared hop length for perceptual features (≈11.6 ms at 22050 Hz)
 
     # --- Multi-resolution STFT ---
-    resolutions = get_stft_resolutions(len(waveform))
+    resolutions = get_stft_resolutions(len(waveform), params=params)
     features["stft_resolutions"] = resolutions
 
     for n_fft in resolutions:
@@ -535,12 +531,20 @@ def extract_features(waveform: np.ndarray, sr: int, wavelet_type: str = "Morlet"
 
     # --- CWT ---
     # Downsample waveform for CWT to bound computation time
-    step_cwt = max(1, len(waveform) // CWT_MAX_SAMPLES)
+    cwt_max_samples = int(get_param(params, "cwt_max_samples", CWT_MAX_SAMPLES))
+    cwt_n_scales = int(get_param(params, "cwt_n_scales", CWT_N_SCALES))
+    n_mels = int(get_param(params, "n_mels", N_MELS))
+    n_mfcc = int(get_param(params, "n_mfcc", N_MFCC))
+    cwt_max_samples = max(512, cwt_max_samples)
+    cwt_n_scales = max(8, cwt_n_scales)
+    n_mels = max(16, n_mels)
+    n_mfcc = max(4, n_mfcc)
+    step_cwt = max(1, len(waveform) // cwt_max_samples)
     waveform_cwt = waveform[::step_cwt].copy()
     n_cwt = len(waveform_cwt)
 
     max_scale = min(512, n_cwt // 2)
-    cwt_scales = np.geomspace(1.0, max(1.0, float(max_scale)), num=CWT_N_SCALES)
+    cwt_scales = np.geomspace(1.0, max(1.0, float(max_scale)), num=cwt_n_scales)
 
     if wavelet_type == "Morlet":
         wavelet_fn = lambda M, s: morlet2_compat(M, s, w=CWT_MORLET_W)
@@ -555,13 +559,13 @@ def extract_features(waveform: np.ndarray, sr: int, wavelet_type: str = "Morlet"
 
     # --- Perceptual features ---
     features["mel"] = librosa.feature.melspectrogram(
-        y=waveform, sr=sr, n_mels=N_MELS, hop_length=hop_default,
+        y=waveform, sr=sr, n_mels=n_mels, hop_length=hop_default,
     )
     features["chroma"] = librosa.feature.chroma_stft(
         y=waveform, sr=sr, hop_length=hop_default,
     )
     features["mfcc"] = librosa.feature.mfcc(
-        y=waveform, sr=sr, n_mfcc=N_MFCC, hop_length=hop_default,
+        y=waveform, sr=sr, n_mfcc=n_mfcc, hop_length=hop_default,
     )
 
     # --- Temporal descriptors ---
@@ -623,6 +627,129 @@ def normalize_to_unit_robust(
         return np.zeros_like(arr, dtype=np.float32)
 
     return np.clip((arr - lo) / (hi - lo), 0.0, 1.0).astype(np.float32)
+
+
+
+def get_param(params: dict | None, key: str, default):
+    """Read a user parameter with a safe fallback."""
+    if params is None:
+        return default
+    return params.get(key, default)
+
+
+def normalize_positive_weights(weight_dict: dict[str, float], fallback: dict[str, float]) -> dict[str, float]:
+    """Normalize non-negative weights; fall back to defaults if their sum is zero."""
+    cleaned = {key: max(0.0, float(value)) for key, value in weight_dict.items()}
+    total = sum(cleaned.values())
+    if total <= 1e-12:
+        cleaned = {key: max(0.0, float(value)) for key, value in fallback.items()}
+        total = sum(cleaned.values())
+    if total <= 1e-12:
+        n = max(1, len(cleaned))
+        return {key: 1.0 / n for key in cleaned}
+    return {key: value / total for key, value in cleaned.items()}
+
+
+def get_magnitude_weights(params: dict | None) -> dict[str, float]:
+    """Return normalized user-controlled magnitude feature weights."""
+    defaults = {
+        "stft": W_STFT_TOTAL,
+        "cwt": W_CWT_MAG,
+        "mel": W_MEL,
+        "chroma": W_CHROMA,
+        "mfcc": W_MFCC,
+        "rms": W_RMS,
+    }
+    values = {
+        "stft": get_param(params, "mag_weight_stft", W_STFT_TOTAL),
+        "cwt": get_param(params, "mag_weight_cwt", W_CWT_MAG),
+        "mel": get_param(params, "mag_weight_mel", W_MEL),
+        "chroma": get_param(params, "mag_weight_chroma", W_CHROMA),
+        "mfcc": get_param(params, "mag_weight_mfcc", W_MFCC),
+        "rms": get_param(params, "mag_weight_rms", W_RMS),
+    }
+    return normalize_positive_weights(values, defaults)
+
+
+def get_phase_weights(params: dict | None, has_cwt_phase: bool) -> dict[str, float]:
+    """Return normalized user-controlled phase feature weights."""
+    defaults = {
+        "stft_mid": W_PHASE_STFT_1024,
+        "stft_fine": W_PHASE_STFT_512,
+        "cwt": W_PHASE_CWT,
+        "onset": W_PHASE_ONSET,
+        "centroid": W_PHASE_CENTROID,
+        "zcr": W_PHASE_ZCR,
+    }
+    values = {
+        "stft_mid": get_param(params, "phase_weight_stft_mid", W_PHASE_STFT_1024),
+        "stft_fine": get_param(params, "phase_weight_stft_fine", W_PHASE_STFT_512),
+        "cwt": get_param(params, "phase_weight_cwt", W_PHASE_CWT),
+        "onset": get_param(params, "phase_weight_onset", W_PHASE_ONSET),
+        "centroid": get_param(params, "phase_weight_centroid", W_PHASE_CENTROID),
+        "zcr": get_param(params, "phase_weight_zcr", W_PHASE_ZCR),
+    }
+
+    if not has_cwt_phase:
+        cwt_weight = max(0.0, float(values.get("cwt", 0.0)))
+        values["cwt"] = 0.0
+        stft_total = max(1e-12, max(0.0, values["stft_mid"]) + max(0.0, values["stft_fine"]))
+        values["stft_mid"] += cwt_weight * max(0.0, values["stft_mid"]) / stft_total
+        values["stft_fine"] += cwt_weight * max(0.0, values["stft_fine"]) / stft_total
+
+    return normalize_positive_weights(values, defaults)
+
+
+def get_rgb_bands(params: dict | None) -> list[tuple[float, float]]:
+    """Return user-controlled low/mid/high frequency bands for RGB synthesis."""
+    low_end = float(get_param(params, "rgb_low_end", 1.0 / 3.0))
+    high_start = float(get_param(params, "rgb_high_start", 2.0 / 3.0))
+    low_end = float(np.clip(low_end, 0.05, 0.90))
+    high_start = float(np.clip(high_start, 0.10, 0.95))
+    if high_start <= low_end + 0.05:
+        mid = 0.5 * (low_end + high_start)
+        low_end = max(0.05, mid - 0.025)
+        high_start = min(0.95, mid + 0.025)
+    return [(0.0, low_end), (low_end, high_start), (high_start, 1.0)]
+
+
+def apply_rgb_balance(image: np.ndarray, params: dict | None) -> np.ndarray:
+    """Apply user-controlled RGB channel gains."""
+    gains = np.array([
+        float(get_param(params, "rgb_balance_r", 1.0)),
+        float(get_param(params, "rgb_balance_g", 1.0)),
+        float(get_param(params, "rgb_balance_b", 1.0)),
+    ], dtype=np.float64)
+    return np.asarray(image, dtype=np.float64) * gains.reshape(1, 1, 3)
+
+
+def apply_global_image_adjustments(image: np.ndarray, params: dict | None, is_grayscale: bool = False) -> np.ndarray:
+    """Apply brightness, contrast, gamma and saturation after global normalization."""
+    img = np.asarray(image, dtype=np.float64)
+    img = np.clip(img, 0.0, 1.0)
+
+    contrast = float(get_param(params, "contrast_strength", 1.0))
+    brightness = float(get_param(params, "brightness_factor", 1.0))
+    gamma = float(get_param(params, "gamma_correction", 0.85))
+    saturation = float(get_param(params, "saturation_factor", 1.0))
+
+    img = 0.5 + contrast * (img - 0.5)
+    img = img * brightness
+    img = np.clip(img, 0.0, 1.0)
+
+    if gamma > 1e-6:
+        img = img ** gamma
+
+    if not is_grayscale and img.ndim == 3 and img.shape[2] == 3:
+        gray = (
+            0.299 * img[:, :, 0]
+            + 0.587 * img[:, :, 1]
+            + 0.114 * img[:, :, 2]
+        )
+        img = gray[:, :, None] + saturation * (img - gray[:, :, None])
+
+    return np.clip(img, 0.0, 1.0)
+
 
 
 def interpolate_to_shape(array: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
@@ -688,67 +815,14 @@ def build_magnitude_grid(
     features: dict,
     target_size: int,
     band: tuple[float, float] | None = None,
+    params: dict | None = None,
 ) -> np.ndarray:
     """
-    Build a (N, N) Fourier magnitude grid M̃[u, v] from multi-resolution
-    audio features.
-
-    The grid is a weighted sum of six independent feature sources.  Each
-    source is log-compressed (log(1 + x)) where applicable, normalized to
-    [0, 1], and bicubically interpolated to (N, N) before blending.
-
-    Source 1 — Multi-resolution STFT log-magnitudes (total weight W_STFT_TOTAL = 0.45):
-        The W_STFT_TOTAL budget is distributed equally across all available
-        STFT resolutions. For a two-minute signal this yields up to 6 STFTs
-        (n_fft ∈ {256, 512, 1024, 2048, 4096, 8192}), each contributing
-        0.45 / 6 = 0.075. Equal weights treat all time–frequency scales
-        symmetrically; no prior assumption is made about which scale is most
-        informative for a given audio class.
-
-    Source 2 — CWT log-magnitude (weight W_CWT_MAG = 0.15):
-        |W[s, t]| after logarithmic compression.  The CWT magnitude encodes
-        the energy at scale s and time t in a way that is complementary to
-        the STFT: at low frequencies the CWT has higher frequency resolution
-        and lower time resolution than the STFT (and vice versa at high
-        frequencies), so the blend fills the resolution gap.
-
-    Source 3 — Log-mel spectrogram (weight W_MEL = 0.18):
-        The mel filterbank integrates STFT power across triangular filters on
-        the mel frequency axis, producing a representation weighted by human
-        auditory sensitivity.  The 20% higher weight relative to MFCC/Chroma
-        reflects the fact that mel magnitude directly encodes spectral energy,
-        while MFCC and Chroma are derived statistics.
-
-    Source 4 — Chroma (weight W_CHROMA = 0.09):
-        12-bin pitch-class energy, summed across octaves.  Captures the
-        harmonic / tonal structure of the signal independently of register.
-        Its 2D (pitch × time) layout maps naturally onto the spatial grid.
-
-    Source 5 — MFCC absolute values (weight W_MFCC = 0.09):
-        |c_i[t]|, i = 0 … N_MFCC − 1.  Absolute values ensure all cepstral
-        coefficients contribute positively (negative coefficients encode
-        spectral valleys, not absence of energy).
-
-    Source 6 — RMS energy envelope (weight W_RMS = 0.04):
-        Tiled (N, N) temporal map.  Encodes loudness dynamics as a spatially
-        uniform amplitude modulation along the time axis.  The low weight (4%)
-        reflects that RMS duplicates information already present in the
-        magnitude spectrograms but at coarser frequency resolution.
-
-    When band ≠ None, all spectrograms are sliced to the fractional sub-band
-    [lo, hi) along the frequency axis before interpolation, restricting the
-    grid to one frequency register for the RGB channel decomposition.
-
-    Parameters:
-        features:    dict from extract_features()
-        target_size: N, output grid side length in pixels
-        band:        (lo, hi) normalized frequency band, or None for full band
-
-    Returns:
-        (N, N) float32 array in [0, 1] representing M̃[u, v]
+    Build a (N, N) Fourier magnitude grid from user-weighted audio features.
     """
+    weights = get_magnitude_weights(params)
     resolutions = features["stft_resolutions"]
-    w_per_stft  = W_STFT_TOTAL / len(resolutions)
+    w_per_stft = weights["stft"] / max(1, len(resolutions))
     components: list[tuple[float, np.ndarray]] = []
 
     for n_fft in resolutions:
@@ -762,22 +836,22 @@ def build_magnitude_grid(
     if band is not None:
         cwt_mag = slice_band(cwt_mag, band)
     cwt_log = normalize_to_unit(np.log1p(cwt_mag))
-    components.append((W_CWT_MAG, interpolate_to_shape(cwt_log, target_size, target_size)))
+    components.append((weights["cwt"], interpolate_to_shape(cwt_log, target_size, target_size)))
 
     mel = features["mel"]
     if band is not None:
         mel = slice_band(mel, band)
     mel_log = normalize_to_unit(np.log1p(mel))
-    components.append((W_MEL, interpolate_to_shape(mel_log, target_size, target_size)))
+    components.append((weights["mel"], interpolate_to_shape(mel_log, target_size, target_size)))
 
     chroma = normalize_to_unit(np.abs(features["chroma"]))
-    components.append((W_CHROMA, interpolate_to_shape(chroma, target_size, target_size)))
+    components.append((weights["chroma"], interpolate_to_shape(chroma, target_size, target_size)))
 
     mfcc = normalize_to_unit(np.abs(features["mfcc"]))
-    components.append((W_MFCC, interpolate_to_shape(mfcc, target_size, target_size)))
+    components.append((weights["mfcc"], interpolate_to_shape(mfcc, target_size, target_size)))
 
     rms_2d = row_to_2d(features["rms"], target_size)
-    components.append((W_RMS, rms_2d))
+    components.append((weights["rms"], rms_2d))
 
     combined = sum(w * arr for w, arr in components)
     return normalize_to_unit(combined)
@@ -787,75 +861,23 @@ def build_magnitude_grid(
 # 2D Fourier phase grid
 # ============================================================
 
+# ============================================================
+# 2D Fourier phase grid
+# ============================================================
+
 def build_phase_grid(
     features: dict,
     target_size: int,
     band: tuple[float, float] | None = None,
+    params: dict | None = None,
 ) -> np.ndarray:
     """
-    Build a (N, N) Fourier phase grid Φ̃[u, v] from multi-resolution audio features.
-
-    The phase grid is assembled from up to six weighted contributions.
-    Because phase is a circular quantity in (−π, π], simple arithmetic
-    averaging can introduce wrap-around bias.  To mitigate this, the STFT and
-    CWT sources are unwrapped before interpolation (removing the 2π
-    discontinuities) so the interpolated field varies smoothly.  The
-    temporal modulation terms (onset, centroid, ZCR) are scaled to lie
-    in [0, π/2], [0, π], and [0, π/4] respectively and act as additive
-    phase offsets rather than independent phase references.  The final
-    combined field is re-wrapped to (−π, π] by the modulo operation.
-
-    Contributions:
-
-    1. STFT instantaneous phase at n_fft = 1024 (weight W_PHASE_STFT_1024 = 0.30):
-       Φ[k, t] = ∠S_{1024}[k, t] ∈ (−π, π].  Unwrapped along both the
-       frequency axis k (to remove octave-boundary jumps) and the time axis t
-       (to remove frame-boundary jumps), then bicubically interpolated to
-       (N, N), then re-wrapped.
-
-    2. STFT instantaneous phase at n_fft = 512 (weight W_PHASE_STFT_512 = 0.20):
-       Same pipeline at the finer-time resolution STFT.  The 512-sample window
-       resolves faster phase evolution (attack transients) that the 1024-window
-       smears over two frames.
-
-    3. CWT instantaneous phase — Morlet only (weight W_PHASE_CWT = 0.20):
-       ∠W[s, t] for the analytic Morlet wavelet.  CWT phase is well-defined
-       because the Morlet wavelet is analytic (imaginary part ≈ 0 at DC),
-       so ∠W represents the true instantaneous phase of the signal bandpassed
-       at scale s.  Unavailable for Ricker (real-valued wavelet): the 0.20
-       weight is redistributed to the two STFT sources instead, raising them
-       to 0.40 and 0.30 respectively.
-
-    4. Onset strength modulation (weight W_PHASE_ONSET = 0.15):
-       onset_strength[t] ≥ 0, normalized to [0, 1] and scaled to [0, π/2].
-       Tiled to (N, N).  Peaks at rhythmic events create spatially localized
-       phase transitions in the image, analogous to the discontinuities at
-       object boundaries that dominate visual perception.
-
-    5. Spectral centroid modulation (weight W_PHASE_CENTROID = 0.10):
-       spectral_centroid[t] normalized to [0, 1] and scaled to [0, π].
-       Encodes the instantaneous brightness (pitch register) of each frame as
-       a time-varying phase offset, mapping melodic contour into a slowly-
-       varying spatial phase gradient.
-
-    6. Zero-crossing rate modulation (weight W_PHASE_ZCR = 0.05):
-       zcr[t] normalized to [0, 1] and scaled to [0, π/4].  High ZCR (noisy
-       or percussive signals) adds fine-scale phase perturbations; low ZCR
-       (tonal signals) leaves the phase smooth.  The small weight (5%)
-       prevents ZCR from dominating over the structured phase sources.
-
-    Parameters:
-        features:    dict from extract_features()
-        target_size: N, output grid side length in pixels
-        band:        (lo, hi) normalized frequency band, or None for full band
-
-    Returns:
-        (N, N) float32 array in (−π, π] representing Φ̃[u, v]
+    Build a (N, N) Fourier phase grid from user-weighted audio features.
     """
-    resolutions  = features["stft_resolutions"]
+    resolutions = features["stft_resolutions"]
     has_cwt_phase = features.get("cwt_phase") is not None
+    weights = get_phase_weights(params, has_cwt_phase=has_cwt_phase)
 
-    # STFT 1024 phase
     n_fft_mid = 1024 if 1024 in resolutions else resolutions[len(resolutions) // 2]
     phase_mid = features[f"phase_{n_fft_mid}"]
     if band is not None:
@@ -863,7 +885,6 @@ def build_phase_grid(
     unwrapped_mid = np.unwrap(np.unwrap(phase_mid, axis=0), axis=1)
     grid_mid = interpolate_to_shape(unwrapped_mid, target_size, target_size)
 
-    # STFT 512 phase (finest available, or fallback to smallest)
     n_fft_fine = 512 if 512 in resolutions else resolutions[0]
     phase_fine = features[f"phase_{n_fft_fine}"]
     if band is not None:
@@ -871,18 +892,6 @@ def build_phase_grid(
     unwrapped_fine = np.unwrap(np.unwrap(phase_fine, axis=0), axis=1)
     grid_fine = interpolate_to_shape(unwrapped_fine, target_size, target_size)
 
-    # Blend weights — redistribute CWT share if unavailable
-    if has_cwt_phase:
-        w_mid, w_fine = W_PHASE_STFT_1024, W_PHASE_STFT_512
-        w_cwt = W_PHASE_CWT
-    else:
-        # Distribute W_PHASE_CWT = 0.20 proportionally to the two STFT sources
-        total_stft = W_PHASE_STFT_1024 + W_PHASE_STFT_512   # = 0.50
-        w_mid  = W_PHASE_STFT_1024 + W_PHASE_CWT * (W_PHASE_STFT_1024 / total_stft)
-        w_fine = W_PHASE_STFT_512  + W_PHASE_CWT * (W_PHASE_STFT_512  / total_stft)
-        w_cwt  = 0.0
-
-    # CWT phase (Morlet only)
     if has_cwt_phase:
         cwt_phase = features["cwt_phase"]
         if band is not None:
@@ -892,22 +901,25 @@ def build_phase_grid(
     else:
         grid_cwt = np.zeros((target_size, target_size), dtype=np.float64)
 
-    # Temporal modulation maps
-    onset_2d    = row_to_2d(features["onset_strength"],    target_size) * (np.pi / 2.0)
+    onset_2d = row_to_2d(features["onset_strength"], target_size) * (np.pi / 2.0)
     centroid_2d = row_to_2d(features["spectral_centroid"], target_size) * np.pi
-    zcr_2d      = row_to_2d(features["zcr"],               target_size) * (np.pi / 4.0)
+    zcr_2d = row_to_2d(features["zcr"], target_size) * (np.pi / 4.0)
 
     phase_combined = (
-        w_mid                  * grid_mid
-        + w_fine               * grid_fine
-        + w_cwt                * grid_cwt
-        + W_PHASE_ONSET        * onset_2d
-        + W_PHASE_CENTROID     * centroid_2d
-        + W_PHASE_ZCR          * zcr_2d
+        weights["stft_mid"] * grid_mid
+        + weights["stft_fine"] * grid_fine
+        + weights["cwt"] * grid_cwt
+        + weights["onset"] * onset_2d
+        + weights["centroid"] * centroid_2d
+        + weights["zcr"] * zcr_2d
     )
 
     return (phase_combined + np.pi) % (2.0 * np.pi) - np.pi
 
+
+# ============================================================
+# Hermitian symmetry enforcement
+# ============================================================
 
 # ============================================================
 # Hermitian symmetry enforcement
@@ -1041,25 +1053,21 @@ def audio_to_image_float(
     features: dict,
     target_size: int,
     output_mode: str,
+    params: dict | None = None,
 ) -> np.ndarray:
     """
     Generate an unnormalized floating-point image patch from extracted features.
-
-    Unlike audio_to_image(), this function does not apply a local [0, 1]
-    normalization after each IFFT. It is therefore suitable for sectioned
-    synthesis, where the final assembled image is normalized globally.
     """
     if output_mode == "Grayscale":
-        mag_2d_raw = build_magnitude_grid(features, target_size, band=None)
-        phase_2d_raw = build_phase_grid(features, target_size, band=None)
+        mag_2d_raw = build_magnitude_grid(features, target_size, band=None, params=params)
+        phase_2d_raw = build_phase_grid(features, target_size, band=None, params=params)
         channel, _ = reconstruct_channel_raw_and_spectrum(mag_2d_raw, phase_2d_raw)
         return np.stack([channel, channel, channel], axis=2)
 
-    bands = [(0.00, 1/3), (1/3, 2/3), (2/3, 1.00)]
     channels = []
-    for band in bands:
-        mag_2d_raw = build_magnitude_grid(features, target_size, band=band)
-        phase_2d_raw = build_phase_grid(features, target_size, band=band)
+    for band in get_rgb_bands(params):
+        mag_2d_raw = build_magnitude_grid(features, target_size, band=band, params=params)
+        phase_2d_raw = build_phase_grid(features, target_size, band=band, params=params)
         channel, _ = reconstruct_channel_raw_and_spectrum(mag_2d_raw, phase_2d_raw)
         channels.append(channel)
 
@@ -1098,8 +1106,8 @@ def audio_to_image(
         low-frequency band used to reconstruct the R channel.
     """
     if output_mode == "Grayscale":
-        mag_2d_raw   = build_magnitude_grid(features, target_size, band=None)
-        phase_2d_raw = build_phase_grid(features, target_size, band=None)
+        mag_2d_raw   = build_magnitude_grid(features, target_size, band=None, params=None)
+        phase_2d_raw = build_phase_grid(features, target_size, band=None, params=None)
         channel, Z_sym = reconstruct_channel_and_spectrum(mag_2d_raw, phase_2d_raw)
         mag_2d_used, phase_2d_used = spectrum_to_centered_magnitude_phase(Z_sym)
         gray = (channel * 255).astype(np.uint8)
@@ -1111,8 +1119,8 @@ def audio_to_image(
     mag_2d_ref = phase_2d_ref = None
 
     for i, band in enumerate(bands):
-        mag_2d_raw   = build_magnitude_grid(features, target_size, band=band)
-        phase_2d_raw = build_phase_grid(features, target_size, band=band)
+        mag_2d_raw   = build_magnitude_grid(features, target_size, band=band, params=None)
+        phase_2d_raw = build_phase_grid(features, target_size, band=band, params=None)
         channel, Z_sym = reconstruct_channel_and_spectrum(mag_2d_raw, phase_2d_raw)
         channels.append((channel * 255).astype(np.uint8))
         if i == 0:
@@ -1297,39 +1305,49 @@ def generate_section_patch(
     patch_size: int,
     output_mode: str,
     wavelet_type: str,
+    params: dict | None = None,
 ) -> np.ndarray:
     """Generate one unnormalized floating-point square patch from one audio section."""
     patch_size = max(8, int(patch_size))
-    features = extract_features(section, sr, wavelet_type=wavelet_type)
+    features = extract_features(section, sr, wavelet_type=wavelet_type, params=params)
     return audio_to_image_float(
         features=features,
         target_size=patch_size,
         output_mode=output_mode,
+        params=params,
     )
 
 
-def finalize_sectioned_image(canvas_float: np.ndarray, output_mode: str) -> np.ndarray:
+def finalize_sectioned_image(canvas_float: np.ndarray, output_mode: str, params: dict | None = None) -> np.ndarray:
     """
-    Apply one global robust normalization after all sections are assembled.
-
-    This avoids local per-section normalization, preserves stronger intensity
-    differences between sections, and gives a less flat final result.
+    Apply one global robust normalization after all sections are assembled,
+    followed by user-controlled brightness/contrast/gamma/saturation.
     """
     canvas_float = np.asarray(canvas_float, dtype=np.float64)
 
-    if output_mode == "Grayscale":
-        gray = normalize_to_unit_robust(canvas_float[:, :, 0], 1.0, 99.0)
-        image = np.stack([gray, gray, gray], axis=2)
-    else:
-        channels = [
-            normalize_to_unit_robust(canvas_float[:, :, c], 1.0, 99.0)
-            for c in range(3)
-        ]
-        image = np.stack(channels, axis=2)
+    lower = float(get_param(params, "robust_lower_percentile", 1.0))
+    upper = float(get_param(params, "robust_upper_percentile", 99.0))
+    if upper <= lower + 0.1:
+        upper = min(100.0, lower + 0.1)
 
-    # Slight contrast lift after global normalization. This is intentionally
-    # global, not section-wise, so it increases relief without equalizing blocks.
-    image = np.clip(image, 0.0, 1.0) ** 0.85
+    if output_mode == "Grayscale":
+        gray = normalize_to_unit_robust(canvas_float[:, :, 0], lower, upper)
+        image = np.stack([gray, gray, gray], axis=2)
+        image = apply_global_image_adjustments(image, params, is_grayscale=True)
+    else:
+        normalization_mode = str(get_param(params, "rgb_normalization_mode", "Per-channel"))
+        if normalization_mode == "Shared":
+            image = normalize_to_unit_robust(canvas_float, lower, upper)
+        else:
+            channels = [
+                normalize_to_unit_robust(canvas_float[:, :, c], lower, upper)
+                for c in range(3)
+            ]
+            image = np.stack(channels, axis=2)
+
+        image = apply_rgb_balance(image, params)
+        image = apply_global_image_adjustments(image, params, is_grayscale=False)
+
     return (image * 255.0).round().astype(np.uint8)
 
 
@@ -1370,25 +1388,13 @@ def otsu_threshold_unit(values: np.ndarray) -> float:
     return float(centers[int(np.argmax(between_class_variance))])
 
 
-def apply_black_drawing_from_grayscale(color_image: np.ndarray, grayscale_image: np.ndarray) -> np.ndarray:
+def apply_black_drawing_from_grayscale(
+    color_image: np.ndarray,
+    grayscale_image: np.ndarray,
+    params: dict | None = None,
+) -> np.ndarray:
     """
-    Use a grayscale-generated image as a sparse binary drawing mask over a color image.
-
-    Step 1:
-        The grayscale image is binarized by Otsu's method.
-
-    Step 2:
-        Between the two Otsu classes, the minority class is selected as the
-        candidate drawing layer.
-
-    Step 3:
-        The candidate class is split again by its own median gray value, so
-        approximately half of the candidate pixels are discarded. The preserved
-        half is the more extreme side of the original histogram:
-            - if the low Otsu class is the minority, keep only its darker half;
-            - if the high Otsu class is the minority, keep only its brighter half.
-
-    The final sparse mask is rendered in black on top of the color image.
+    Use a grayscale-generated image as a sparse black drawing mask over a color image.
     """
     color = np.asarray(color_image, dtype=np.uint8).copy()
     gray_rgb = np.asarray(grayscale_image, dtype=np.float64)
@@ -1399,16 +1405,27 @@ def apply_black_drawing_from_grayscale(color_image: np.ndarray, grayscale_image:
         gray = gray_rgb
 
     gray = normalize_to_unit(gray)
+    smooth_sigma = float(get_param(params, "ink_smoothing_sigma", 0.0))
+    if smooth_sigma > 0:
+        gray = scipy.ndimage.gaussian_filter(gray, sigma=smooth_sigma)
+
     threshold = otsu_threshold_unit(gray)
     low_mask = gray <= threshold
     high_mask = gray > threshold
 
+    class_choice = str(get_param(params, "ink_class_choice", "Automatic minority"))
     low_count = int(np.count_nonzero(low_mask))
     high_count = int(np.count_nonzero(high_mask))
 
     if low_count == 0 and high_count == 0:
         return color
-    if low_count == 0:
+    if class_choice == "Dark class":
+        candidate_mask = low_mask
+        keep_high_extreme = False
+    elif class_choice == "Bright class":
+        candidate_mask = high_mask
+        keep_high_extreme = True
+    elif low_count == 0:
         candidate_mask = high_mask
         keep_high_extreme = True
     elif high_count == 0:
@@ -1425,47 +1442,31 @@ def apply_black_drawing_from_grayscale(color_image: np.ndarray, grayscale_image:
     if candidate_values.size == 0:
         return color
 
-    # Split the selected Otsu class into two parts with approximately equal
-    # pixel counts. This keeps only half of the original black drawing pixels.
-    second_threshold = float(np.median(candidate_values))
-    if keep_high_extreme:
-        drawing_mask = candidate_mask & (gray >= second_threshold)
-    else:
-        drawing_mask = candidate_mask & (gray <= second_threshold)
+    keep_percent = float(get_param(params, "ink_keep_percentile", 50.0))
+    keep_percent = float(np.clip(keep_percent, 1.0, 100.0))
 
-    # Degenerate fallback: if the selected class is constant, median splitting
-    # may keep all pixels. In that case, keep exactly the most extreme half by
-    # rank, while preserving the intended dark/bright side.
-    if np.count_nonzero(drawing_mask) >= candidate_values.size:
-        candidate_indices = np.flatnonzero(candidate_mask.ravel())
-        candidate_gray = gray.ravel()[candidate_indices]
-        n_keep = max(1, candidate_indices.size // 2)
-        if keep_high_extreme:
-            keep_local = np.argpartition(candidate_gray, -n_keep)[-n_keep:]
-        else:
-            keep_local = np.argpartition(candidate_gray, n_keep - 1)[:n_keep]
-        drawing_flat = np.zeros(gray.size, dtype=bool)
-        drawing_flat[candidate_indices[keep_local]] = True
-        drawing_mask = drawing_flat.reshape(gray.shape)
+    if keep_high_extreme:
+        threshold2 = float(np.percentile(candidate_values, 100.0 - keep_percent))
+        drawing_mask = candidate_mask & (gray >= threshold2)
+    else:
+        threshold2 = float(np.percentile(candidate_values, keep_percent))
+        drawing_mask = candidate_mask & (gray <= threshold2)
+
+    thickness = int(get_param(params, "ink_thickness", 0))
+    if thickness > 0:
+        drawing_mask = scipy.ndimage.binary_dilation(drawing_mask, iterations=thickness)
 
     color[drawing_mask] = 0
     return color
 
 
-def apply_grayscale_mix_to_color(color_image: np.ndarray, grayscale_image: np.ndarray) -> np.ndarray:
+def apply_grayscale_mix_to_color(
+    color_image: np.ndarray,
+    grayscale_image: np.ndarray,
+    params: dict | None = None,
+) -> np.ndarray:
     """
-    Use a grayscale-generated image as a multiplicative coefficient map over a color image.
-
-    The color image provides the RGB base. The grayscale image is converted to
-    a coefficient field C(x, y) in [0, 1], then each color channel is multiplied
-    by this same coefficient:
-
-        R_out = C · R
-        G_out = C · G
-        B_out = C · B
-
-    This keeps the chromatic structure from the Colors mode while using the
-    grayscale reconstruction as a luminance/contrast modulation.
+    Use a grayscale-generated image as a multiplicative luminance coefficient map.
     """
     color = np.asarray(color_image, dtype=np.float64)
     gray_rgb = np.asarray(grayscale_image, dtype=np.float64)
@@ -1476,7 +1477,25 @@ def apply_grayscale_mix_to_color(color_image: np.ndarray, grayscale_image: np.nd
         gray = gray_rgb
 
     coeff = normalize_to_unit(gray)
-    mixed = color * coeff[:, :, None]
+
+    blur_sigma = float(get_param(params, "luma_coeff_blur_sigma", 0.0))
+    if blur_sigma > 0:
+        coeff = scipy.ndimage.gaussian_filter(coeff, sigma=blur_sigma)
+        coeff = normalize_to_unit(coeff)
+
+    coeff_gamma = float(get_param(params, "luma_gamma", 1.0))
+    if coeff_gamma > 1e-6:
+        coeff = coeff ** coeff_gamma
+
+    min_coeff = float(get_param(params, "luma_min_coeff", 0.0))
+    min_coeff = float(np.clip(min_coeff, 0.0, 1.0))
+    coeff = min_coeff + (1.0 - min_coeff) * coeff
+
+    strength = float(get_param(params, "luma_strength", 1.0))
+    strength = float(np.clip(strength, 0.0, 1.0))
+    effective_coeff = (1.0 - strength) + strength * coeff
+
+    mixed = color * effective_coeff[:, :, None]
     return np.clip(mixed, 0.0, 255.0).round().astype(np.uint8)
 
 
@@ -1526,14 +1545,9 @@ def watershed_flood_from_markers(gradient: np.ndarray, markers: np.ndarray) -> n
     return labels
 
 
-def make_watershed_region_image(image_rgb: np.ndarray) -> np.ndarray:
+def make_watershed_region_image(image_rgb: np.ndarray, params: dict | None = None) -> np.ndarray:
     """
-    Convert an RGB image into a watershed-like region image.
-
-    The input image is segmented into regions using a marker-controlled
-    watershed on the smoothed luminance gradient. Each region is then filled
-    with the color of one deterministic pseudo-random pixel sampled inside
-    that same region. Region boundaries are drawn in black.
+    Convert an RGB image into a watershed-like region image with user controls.
     """
     image = np.asarray(image_rgb, dtype=np.uint8)
     if image.ndim != 3 or image.shape[2] != 3:
@@ -1549,19 +1563,15 @@ def make_watershed_region_image(image_rgb: np.ndarray) -> np.ndarray:
     )
     gray = normalize_to_unit(gray)
 
-    # Smooth first so the watershed reacts to broad image structures rather
-    # than to every tiny RGB fluctuation.
-    smooth_sigma = max(0.8, n / 384.0)
-    gray_smooth = scipy.ndimage.gaussian_filter(gray, sigma=smooth_sigma)
+    smooth_sigma = float(get_param(params, "watershed_gradient_smoothing", max(0.8, n / 384.0)))
+    gray_smooth = scipy.ndimage.gaussian_filter(gray, sigma=max(0.0, smooth_sigma))
 
     grad_x = scipy.ndimage.sobel(gray_smooth, axis=1)
     grad_y = scipy.ndimage.sobel(gray_smooth, axis=0)
     gradient = normalize_to_unit(np.hypot(grad_x, grad_y))
 
-    # Marker placement: divide the image into cells and place one marker at
-    # the minimum-gradient pixel of each cell. This gives a stable, dependency-
-    # free watershed-like partition without adding scikit-image.
-    cell_size = max(12, int(round(n / 14.0)))
+    cell_size = int(get_param(params, "watershed_marker_spacing", max(12, int(round(n / 14.0)))))
+    cell_size = max(4, cell_size)
     markers = np.zeros((h, w), dtype=np.int32)
     label = 1
 
@@ -1578,38 +1588,53 @@ def make_watershed_region_image(image_rgb: np.ndarray) -> np.ndarray:
 
     labels = watershed_flood_from_markers(gradient, markers)
 
-    # Fill each watershed region with the color of one deterministic
-    # pseudo-random pixel from that same region.
-    rng = np.random.default_rng(12345)
+    color_mode = str(get_param(params, "watershed_region_color_mode", "Random pixel"))
+    seed = int(get_param(params, "watershed_random_seed", 12345))
+    rng = np.random.default_rng(seed)
     out = np.zeros_like(image, dtype=np.uint8)
 
     for lab in range(1, int(labels.max()) + 1):
         ys, xs = np.where(labels == lab)
         if ys.size == 0:
             continue
-        idx = int(rng.integers(0, ys.size))
-        sampled_color = image[ys[idx], xs[idx]]
-        out[ys, xs] = sampled_color
 
-    # Draw black contours between neighboring regions.
+        region_colors = image[ys, xs].astype(np.float64)
+        if color_mode == "Mean color":
+            sampled_color = np.mean(region_colors, axis=0)
+        elif color_mode == "Median color":
+            sampled_color = np.median(region_colors, axis=0)
+        else:
+            idx = int(rng.integers(0, ys.size))
+            sampled_color = image[ys[idx], xs[idx]].astype(np.float64)
+
+        out[ys, xs] = np.clip(sampled_color, 0.0, 255.0).round().astype(np.uint8)
+
     boundary = np.zeros((h, w), dtype=bool)
     boundary[:, 1:] |= labels[:, 1:] != labels[:, :-1]
     boundary[:, :-1] |= labels[:, 1:] != labels[:, :-1]
     boundary[1:, :] |= labels[1:, :] != labels[:-1, :]
     boundary[:-1, :] |= labels[1:, :] != labels[:-1, :]
 
-    # Slightly thicken the contours so they remain visible after display scaling.
-    #boundary = scipy.ndimage.binary_dilation(boundary, iterations=max(1, n // 256))
-    #boundary = scipy.ndimage.binary_dilation(boundary, iterations=1)
-    #out[boundary] = 0
-    #local_mean = np.stack(
-    #    [
-    #        scipy.ndimage.uniform_filter(out[:, :, c].astype(np.float64), size=5, mode="nearest")
-    #        for c in range(3)
-    #    ],
-    #    axis=2,
-    #)
-    #out[boundary] = np.clip(local_mean[boundary], 0, 255).round().astype(np.uint8)
+    boundary_style = str(get_param(params, "watershed_boundary_style", "None"))
+    thickness = int(get_param(params, "watershed_boundary_thickness", 0))
+    if thickness > 0:
+        boundary = scipy.ndimage.binary_dilation(boundary, iterations=thickness)
+
+    if boundary_style == "Black":
+        out[boundary] = 0
+    elif boundary_style == "Local mean":
+        window = int(get_param(params, "watershed_boundary_mean_window", 5))
+        if window % 2 == 0:
+            window += 1
+        window = max(3, window)
+        local_mean = np.stack(
+            [
+                scipy.ndimage.uniform_filter(out[:, :, c].astype(np.float64), size=window, mode="nearest")
+                for c in range(3)
+            ],
+            axis=2,
+        )
+        out[boundary] = np.clip(local_mean[boundary], 0.0, 255.0).round().astype(np.uint8)
 
     return out
 
@@ -1668,6 +1693,7 @@ def generate_sectioned_image(
     n_sections: int,
     section_layout: str = "None",
     progress_callback=None,
+    params: dict | None = None,
 ) -> np.ndarray:
     """
     Generate a final square image by processing temporal sections sequentially.
@@ -1713,6 +1739,7 @@ def generate_sectioned_image(
             n_sections=n_sections,
             section_layout=section_layout,
             progress_callback=color_progress,
+            params=params,
         )
         grayscale_image = generate_sectioned_image(
             waveform=waveform,
@@ -1723,17 +1750,18 @@ def generate_sectioned_image(
             n_sections=n_sections,
             section_layout=section_layout,
             progress_callback=grayscale_progress,
+            params=params,
         )
 
         if output_mode == "Black mix":
-            return apply_black_drawing_from_grayscale(color_image, grayscale_image)
+            return apply_black_drawing_from_grayscale(color_image, grayscale_image, params=params)
 
-        mixed_image = apply_grayscale_mix_to_color(color_image, grayscale_image)
+        mixed_image = apply_grayscale_mix_to_color(color_image, grayscale_image, params=params)
 
         if output_mode == "Luma mix":
             return mixed_image
 
-        return make_watershed_region_image(mixed_image)
+        return make_watershed_region_image(mixed_image, params=params)
 
     section_layout = section_layout if section_layout in SECTION_LAYOUT_OPTIONS else "None"
 
@@ -1744,10 +1772,11 @@ def generate_sectioned_image(
             patch_size=target_size,
             output_mode=output_mode,
             wavelet_type=wavelet_type,
+            params=params,
         )
         if progress_callback is not None:
             progress_callback(1, 1)
-        return finalize_sectioned_image(patch, output_mode)
+        return finalize_sectioned_image(patch, output_mode, params=params)
 
     sections = split_waveform_into_sections(waveform, n_sections)
     canvas = np.zeros((target_size, target_size, 3), dtype=np.float64)
@@ -1764,6 +1793,7 @@ def generate_sectioned_image(
                 patch_size=local_size,
                 output_mode=output_mode,
                 wavelet_type=wavelet_type,
+                params=params,
             )
             patch_rect = fit_square_patch_to_rect_float(patch, rect["w"], rect["h"])
 
@@ -1774,7 +1804,7 @@ def generate_sectioned_image(
             if progress_callback is not None:
                 progress_callback(idx + 1, n_sections)
 
-        return finalize_sectioned_image(canvas, output_mode)
+        return finalize_sectioned_image(canvas, output_mode, params=params)
 
     index_map = build_layout_index_map(target_size, n_sections, section_layout)
     if index_map is None:
@@ -1792,6 +1822,7 @@ def generate_sectioned_image(
             patch_size=patch_size,
             output_mode=output_mode,
             wavelet_type=wavelet_type,
+            params=params,
         )
         patch_full = resize_float_image_to_square(patch, target_size)
         mask = index_map == idx
@@ -1800,7 +1831,7 @@ def generate_sectioned_image(
         if progress_callback is not None:
             progress_callback(idx + 1, n_sections)
 
-    return finalize_sectioned_image(canvas, output_mode)
+    return finalize_sectioned_image(canvas, output_mode, params=params)
 
 def output_image_fourier_to_display_images(image_rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """
@@ -2068,6 +2099,126 @@ def render_documentation_tab(titles: list[str], sections: dict[str, str], state_
         st.markdown(sections[st.session_state[state_key]])
 
 
+
+def render_advanced_parameter_controls() -> dict:
+    """
+    Render advanced controls and return a dictionary consumed by the synthesis pipeline.
+
+    Each group is placed in its own bordered container so the large Parameters
+    expander remains readable even with many controls exposed.
+    """
+    params: dict = {}
+
+    row1_col1, row1_col2, row1_col3 = st.columns(3, gap="large")
+
+    with row1_col1:
+        with st.container(border=True):
+            st.markdown("##### Global rendering")
+            params["robust_lower_percentile"] = st.slider("Normalization lower percentile", 0.0, 10.0, 1.0, 0.5, on_change=clear_results)
+            params["robust_upper_percentile"] = st.slider("Normalization upper percentile", 90.0, 100.0, 99.0, 0.5, on_change=clear_results)
+            params["gamma_correction"] = st.slider("Gamma correction", 0.20, 2.50, 0.85, 0.05, on_change=clear_results)
+            params["contrast_strength"] = st.slider("Contrast strength", 0.20, 3.00, 1.00, 0.05, on_change=clear_results)
+            params["brightness_factor"] = st.slider("Brightness factor", 0.20, 2.50, 1.00, 0.05, on_change=clear_results)
+            params["saturation_factor"] = st.slider("Saturation factor", 0.00, 3.00, 1.00, 0.05, on_change=clear_results)
+
+    with row1_col2:
+        with st.container(border=True):
+            st.markdown("##### Colors / RGB")
+            params["rgb_low_end"] = st.slider("Low-to-mid band limit", 0.10, 0.45, 1.0 / 3.0, 0.01, on_change=clear_results)
+            params["rgb_high_start"] = st.slider("Mid-to-high band limit", 0.55, 0.90, 2.0 / 3.0, 0.01, on_change=clear_results)
+            params["rgb_normalization_mode"] = st.selectbox("RGB normalization", ["Per-channel", "Shared"], index=0, on_change=clear_results)
+            params["rgb_balance_r"] = st.slider("Red channel balance", 0.00, 3.00, 1.00, 0.05, on_change=clear_results)
+            params["rgb_balance_g"] = st.slider("Green channel balance", 0.00, 3.00, 1.00, 0.05, on_change=clear_results)
+            params["rgb_balance_b"] = st.slider("Blue channel balance", 0.00, 3.00, 1.00, 0.05, on_change=clear_results)
+
+    with row1_col3:
+        with st.container(border=True):
+            st.markdown("##### Black mix")
+            params["ink_class_choice"] = st.selectbox(
+                "Otsu class choice",
+                ["Automatic minority", "Dark class", "Bright class"],
+                index=0,
+                on_change=clear_results,
+            )
+            params["ink_keep_percentile"] = st.slider("Black pixel density in selected class (%)", 1.0, 100.0, 50.0, 1.0, on_change=clear_results)
+            params["ink_smoothing_sigma"] = st.slider("Smoothing before binarization", 0.0, 10.0, 0.0, 0.25, on_change=clear_results)
+            params["ink_thickness"] = st.slider("Black line thickness", 0, 8, 0, 1, on_change=clear_results)
+
+    row2_col1, row2_col2, row2_col3 = st.columns(3, gap="large")
+
+    with row2_col1:
+        with st.container(border=True):
+            st.markdown("##### Luma mix")
+            params["luma_strength"] = st.slider("Luma mix strength", 0.0, 1.0, 1.0, 0.05, on_change=clear_results)
+            params["luma_min_coeff"] = st.slider("Minimum luminance coefficient", 0.0, 1.0, 0.0, 0.05, on_change=clear_results)
+            params["luma_gamma"] = st.slider("Luminance coefficient gamma", 0.20, 3.00, 1.00, 0.05, on_change=clear_results)
+            params["luma_coeff_blur_sigma"] = st.slider("Coefficient blur before multiplication", 0.0, 12.0, 0.0, 0.25, on_change=clear_results)
+
+    with row2_col2:
+        with st.container(border=True):
+            st.markdown("##### Watershed")
+            params["watershed_marker_spacing"] = st.slider("Marker spacing / region size (px)", 4, 160, 36, 1, on_change=clear_results)
+            params["watershed_gradient_smoothing"] = st.slider("Gradient smoothing", 0.0, 8.0, 1.3, 0.1, on_change=clear_results)
+            params["watershed_region_color_mode"] = st.selectbox(
+                "Region color mode",
+                ["Random pixel", "Mean color", "Median color"],
+                index=0,
+                on_change=clear_results,
+            )
+            params["watershed_random_seed"] = st.number_input("Random seed", min_value=0, max_value=999999, value=12345, step=1, on_change=clear_results)
+
+    with row2_col3:
+        with st.container(border=True):
+            st.markdown("##### Watershed boundary")
+            params["watershed_boundary_style"] = st.selectbox("Boundary style", ["None", "Black", "Local mean"], index=0, on_change=clear_results)
+            params["watershed_boundary_thickness"] = st.slider("Boundary thickness", 0, 8, 0, 1, on_change=clear_results)
+            params["watershed_boundary_mean_window"] = st.slider("Boundary local mean window", 3, 21, 5, 2, on_change=clear_results)
+
+    row3_col1, row3_col2 = st.columns(2, gap="large")
+
+    with row3_col1:
+        with st.container(border=True):
+            st.markdown("##### Magnitude feature weights")
+            mag_col1, mag_col2 = st.columns(2)
+            with mag_col1:
+                params["mag_weight_stft"] = st.slider("STFT magnitude weight", 0.0, 1.0, W_STFT_TOTAL, 0.01, on_change=clear_results)
+                params["mag_weight_cwt"] = st.slider("CWT magnitude weight", 0.0, 1.0, W_CWT_MAG, 0.01, on_change=clear_results)
+                params["mag_weight_mel"] = st.slider("Mel magnitude weight", 0.0, 1.0, W_MEL, 0.01, on_change=clear_results)
+            with mag_col2:
+                params["mag_weight_chroma"] = st.slider("Chroma magnitude weight", 0.0, 1.0, W_CHROMA, 0.01, on_change=clear_results)
+                params["mag_weight_mfcc"] = st.slider("MFCC magnitude weight", 0.0, 1.0, W_MFCC, 0.01, on_change=clear_results)
+                params["mag_weight_rms"] = st.slider("RMS magnitude weight", 0.0, 1.0, W_RMS, 0.01, on_change=clear_results)
+
+    with row3_col2:
+        with st.container(border=True):
+            st.markdown("##### Phase feature weights")
+            phase_col1, phase_col2 = st.columns(2)
+            with phase_col1:
+                params["phase_weight_stft_mid"] = st.slider("STFT 1024 phase weight", 0.0, 1.0, W_PHASE_STFT_1024, 0.01, on_change=clear_results)
+                params["phase_weight_stft_fine"] = st.slider("STFT 512 phase weight", 0.0, 1.0, W_PHASE_STFT_512, 0.01, on_change=clear_results)
+                params["phase_weight_cwt"] = st.slider("CWT phase weight", 0.0, 1.0, W_PHASE_CWT, 0.01, on_change=clear_results)
+            with phase_col2:
+                params["phase_weight_onset"] = st.slider("Onset phase weight", 0.0, 1.0, W_PHASE_ONSET, 0.01, on_change=clear_results)
+                params["phase_weight_centroid"] = st.slider("Centroid phase weight", 0.0, 1.0, W_PHASE_CENTROID, 0.01, on_change=clear_results)
+                params["phase_weight_zcr"] = st.slider("ZCR phase weight", 0.0, 1.0, W_PHASE_ZCR, 0.01, on_change=clear_results)
+
+    with st.container(border=True):
+        st.markdown("##### Analysis parameters")
+        a_col1, a_col2, a_col3 = st.columns(3, gap="large")
+        fft_options = [256, 512, 1024, 2048, 4096, 8192]
+        with a_col1:
+            params["stft_n_fft_min"] = st.selectbox("STFT minimum window", fft_options, index=0, on_change=clear_results)
+            params["stft_n_fft_max"] = st.selectbox("STFT maximum window", fft_options, index=5, on_change=clear_results)
+        with a_col2:
+            params["cwt_n_scales"] = st.slider("CWT number of scales", 16, 128, CWT_N_SCALES, 4, on_change=clear_results)
+            params["cwt_max_samples"] = st.slider("CWT maximum samples", 4096, 220500, CWT_MAX_SAMPLES, 4096, on_change=clear_results)
+        with a_col3:
+            params["n_mels"] = st.slider("Number of mel bands", 32, 256, N_MELS, 8, on_change=clear_results)
+            params["n_mfcc"] = st.slider("Number of MFCC coefficients", 8, 64, N_MFCC, 1, on_change=clear_results)
+
+    return params
+
+
 # ============================================================
 # App tab
 # ============================================================
@@ -2086,16 +2237,8 @@ def render_app_tab() -> None:
     ):
         def_waveform, def_sr, def_bytes = load_default_audio()
         if def_bytes is not None:
-            st.session_state.audio_bytes   = def_bytes
+            st.session_state.audio_bytes = def_bytes
             st.session_state.using_default = True
-
-    # --------------------------------------------------------
-    # Three-column layout
-    # col1: universal input + Run + collapsed parameters
-    # col2: output image + download
-    # col3: diagnostic plots in expanders
-    # --------------------------------------------------------
-    col1, col2, col3 = st.columns([1.0, 1.35, 1.35], gap="large")
 
     waveform_preview = None
     sr_preview = None
@@ -2105,8 +2248,12 @@ def render_app_tab() -> None:
         except Exception:
             waveform_preview, sr_preview = None, None
 
-    # ---- Column 1: universal input + Run + parameters ----
-    with col1:
+    # ========================================================
+    # Row 1: input box + run button, output image + download
+    # ========================================================
+    input_col, output_col = st.columns([1.0, 1.35], gap="large")
+
+    with input_col:
         with st.container(border=True):
             st.markdown("#### Input audio signal")
 
@@ -2129,6 +2276,9 @@ def render_app_tab() -> None:
                         st.rerun()
                     st.caption(f"Default sample: {DEFAULT_AUDIO_TITLE} — {DEFAULT_AUDIO_DESCRIPTION}")
                     st.audio(def_bytes)
+                    if waveform_preview is not None:
+                        st.markdown("##### Waveform")
+                        st.image(waveform_to_display_image(waveform_preview), width="stretch")
                 else:
                     st.error("The default audio sample could not be loaded.")
                     st.session_state.audio_bytes = None
@@ -2169,6 +2319,9 @@ def render_app_tab() -> None:
                             st.session_state.results = None
                             st.rerun()
                         st.audio(recorded_bytes)
+                        if waveform_preview is not None:
+                            st.markdown("##### Waveform")
+                            st.image(waveform_to_display_image(waveform_preview), width="stretch")
                     else:
                         st.info("Record an audio signal with your microphone.")
                         st.session_state.audio_bytes = None
@@ -2185,7 +2338,36 @@ def render_app_tab() -> None:
             disabled=(st.session_state.audio_bytes is None),
         )
 
-        with st.expander("Parameters", expanded=False):
+    with output_col:
+        output_box = st.container(border=True)
+        with output_box:
+            st.markdown("#### Output image")
+            output_placeholder = st.empty()
+            download_placeholder = st.empty()
+
+            results = st.session_state.results
+            if results is None:
+                output_placeholder.info("Generated image will appear here after you click **Run**.")
+            else:
+                with output_placeholder.container():
+                    render_image_output("Generated image", results["generated_image"])
+                with download_placeholder.container():
+                    st.download_button(
+                        "Download image (PNG)",
+                        data=results["png_bytes"],
+                        file_name="output.png",
+                        mime="image/png",
+                        width="stretch",
+                    )
+
+    # ========================================================
+    # Row 2: parameters box
+    # ========================================================
+    with st.expander("Parameters", expanded=False):
+
+        p_top_1, p_top_2, p_top_3 = st.columns([1.0, 1.0, 1.0], gap="large")
+
+        with p_top_1:
             target_size = st.slider(
                 "Output image size (px)",
                 min_value=IMAGE_SIZE_MIN,
@@ -2196,6 +2378,7 @@ def render_app_tab() -> None:
                 on_change=clear_results,
             )
 
+        with p_top_2:
             output_mode = st.radio(
                 "Output mode",
                 options=OUTPUT_MODE_OPTIONS,
@@ -2205,6 +2388,7 @@ def render_app_tab() -> None:
                 on_change=clear_results,
             )
 
+        with p_top_3:
             section_layout = st.selectbox(
                 "Section layout",
                 options=SECTION_LAYOUT_OPTIONS,
@@ -2217,6 +2401,9 @@ def render_app_tab() -> None:
                 ),
             )
 
+        p_mid_1, p_mid_2 = st.columns([1.0, 1.0], gap="large")
+
+        with p_mid_1:
             if waveform_preview is None or sr_preview is None:
                 n_sections = 1
                 st.info(
@@ -2281,6 +2468,7 @@ def render_app_tab() -> None:
                     f"Dynamic maximum sections: {k_max}"
                 )
 
+        with p_mid_2:
             wavelet_type = st.selectbox(
                 "CWT wavelet",
                 options=WAVELET_OPTIONS,
@@ -2295,8 +2483,14 @@ def render_app_tab() -> None:
                 ),
             )
 
+        synthesis_params = render_advanced_parameter_controls()
 
-    # ---- Run computation ----
+    if "synthesis_params" not in locals():
+        synthesis_params = {}
+
+    # ========================================================
+    # Run computation
+    # ========================================================
     if run_clicked and st.session_state.audio_bytes is not None:
         with st.spinner("Loading audio…"):
             waveform, sr = load_audio(st.session_state.audio_bytes)
@@ -2307,12 +2501,12 @@ def render_app_tab() -> None:
             k_max_runtime = compute_max_sections(len(waveform), target_size)
             n_sections_runtime = 1 if section_layout == "None" else min(max(1, int(n_sections)), k_max_runtime)
 
-            with col2:
+            with output_box:
                 progress_text = st.empty()
                 progress_bar = st.progress(0.0)
 
             def update_progress(done: int, total: int) -> None:
-                with col2:
+                with output_box:
                     progress_text.markdown(
                         f'<p class="small-muted">Computing section {done}/{total}…</p>',
                         unsafe_allow_html=True,
@@ -2329,25 +2523,16 @@ def render_app_tab() -> None:
                     n_sections=n_sections_runtime,
                     section_layout=section_layout,
                     progress_callback=update_progress,
+                    params=synthesis_params,
                 )
 
-            with col2:
-                progress_bar.empty()
-                progress_text.empty()
-
-            duration = len(waveform) / sr
-            input_waveform_display = waveform_to_display_image(waveform)
-            input_spectrogram_display = spectrogram_to_display_image(waveform)
-            output_mag_display, output_phase_display = output_image_fourier_to_display_images(image_rgb)
+            progress_bar.empty()
+            progress_text.empty()
 
             st.session_state.results = {
-                "input_waveform_display": input_waveform_display,
-                "input_spectrogram_display": input_spectrogram_display,
-                "output_mag_display": output_mag_display,
-                "output_phase_display": output_phase_display,
                 "generated_image": image_rgb,
                 "png_bytes": image_to_png_bytes(image_rgb),
-                "duration": duration,
+                "duration": len(waveform) / sr,
                 "sr": sr,
                 "n_samples": len(waveform),
                 "n_sections": n_sections_runtime,
@@ -2355,47 +2540,20 @@ def render_app_tab() -> None:
                 "output_mode": output_mode,
             }
 
-    results = st.session_state.results
+            with output_box:
+                output_placeholder.empty()
+                download_placeholder.empty()
+                with output_placeholder.container():
+                    render_image_output("Generated image", image_rgb)
+                with download_placeholder.container():
+                    st.download_button(
+                        "Download image (PNG)",
+                        data=st.session_state.results["png_bytes"],
+                        file_name="output.png",
+                        mime="image/png",
+                        width="stretch",
+                    )
 
-    # ---- Column 2: output only ----
-    with col2:
-        if results is None:
-            st.info("Generated image will appear here after you click **Run**.")
-        else:
-            render_image_output("Generated image", results["generated_image"])
-            st.download_button(
-                "Download image (PNG)",
-                data=results["png_bytes"],
-                file_name="output.png",
-                mime="image/png",
-                width="stretch",
-            )
-
-    # ---- Column 3: diagnostic plots ----
-    with col3:
-        if results is None:
-            with st.expander("Input signal plots", expanded=False):
-                st.info("Input plots will appear after computation.")
-            with st.expander("Fourier plots of the output image", expanded=False):
-                st.info("Output-image Fourier plots will appear after computation.")
-        else:
-            with st.expander("Input signal plots", expanded=False):
-                render_image_output("Waveform", results["input_waveform_display"])
-                render_image_output("Log-magnitude spectrogram", results["input_spectrogram_display"])
-                st.markdown(
-                    f'<p class="small-muted">'
-                    f'Duration: {results["duration"]:.2f} s &nbsp;·&nbsp; '
-                    f'SR: {results["sr"]} Hz &nbsp;·&nbsp; '
-                    f'Samples: {results["n_samples"]} &nbsp;·&nbsp; '
-                    f'Sections: {results["n_sections"]} &nbsp;·&nbsp; '
-                    f'Layout: {html.escape(results.get("section_layout", "None"))}'
-                    f'</p>',
-                    unsafe_allow_html=True,
-                )
-
-            with st.expander("Fourier plots of the output image", expanded=False):
-                render_image_output("2D Fourier magnitude of the output image", results["output_mag_display"])
-                render_image_output("2D Fourier phase of the output image", results["output_phase_display"])
 
 
 # ============================================================
