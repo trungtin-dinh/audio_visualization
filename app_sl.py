@@ -4,10 +4,12 @@ import html
 import io
 import re
 import warnings
+import urllib.request
 from pathlib import Path
 
 import numpy as np
 import scipy.interpolate
+import scipy.ndimage
 import scipy.signal
 import matplotlib.cm as matplotlib_cm
 import streamlit as st
@@ -130,6 +132,15 @@ W_PHASE_ZCR:       float = 0.05
 
 WAVELET_OPTIONS     = ["Morlet", "Ricker (Mexican hat)"]
 OUTPUT_MODE_OPTIONS = ["Grayscale", "Colors"]
+SECTION_LAYOUT_OPTIONS = [
+    "None",
+    "Chronological treemap",
+    "Clockwise circular slices",
+    "Concentric circles",
+    "Concentric squares",
+    "Vertical strips",
+    "Horizontal strips",
+]
 
 # Sectioned image synthesis
 MIN_SECTION_SAMPLES: int = 16_384
@@ -143,6 +154,13 @@ COLORMAP_OPTIONS    = [
     "Blues", "Greens", "Reds", "Purples",
 ]
 AUDIO_TYPES = ["wav", "mp3", "flac", "ogg", "m4a"]
+
+# Default open-source music sample.  The file is 14 s long and released as
+# CC0 on Wikimedia Commons, which is long enough to make the default section
+# count reach 32 with the current MIN_SECTION_SAMPLES rule.
+DEFAULT_AUDIO_TITLE = "Phonk sample.ogg"
+DEFAULT_AUDIO_DESCRIPTION = "8-bar drift phonk instrumental at 140 BPM, CC0, Wikimedia Commons"
+DEFAULT_AUDIO_URL = "https://upload.wikimedia.org/wikipedia/commons/2/2c/Phonk_sample.ogg"
 
 LATEX_DELIMITERS = [
     {"left": "$$", "right": "$$", "display": True},
@@ -282,10 +300,12 @@ DOC_EN_TITLES   = list(DOC_EN_SECTIONS.keys())
 @st.cache_data(show_spinner=False)
 def load_default_audio() -> tuple[np.ndarray | None, int | None, bytes | None]:
     """
-    Load the built-in librosa trumpet example as the default test sample.
+    Load the default open-source music sample.
 
-    The file is fetched from Zenodo on the first call and then cached locally
-    by librosa. The waveform is loaded at its original sample rate.
+    The default file is downloaded from Wikimedia Commons and decoded at its
+    original sample rate. It is intentionally longer than the previous librosa
+    trumpet example so that the default number of sections can reach 32 when
+    the image size is large enough.
 
     Returns:
         waveform:    (N,) float32 mono signal, or None on failure
@@ -295,10 +315,16 @@ def load_default_audio() -> tuple[np.ndarray | None, int | None, bytes | None]:
     if not LIBROSA_AVAILABLE:
         return None, None, None
     try:
-        path = librosa.ex("trumpet")
-        waveform, sr = librosa.load(path, sr=None, mono=True)
-        with open(path, "rb") as fh:
-            audio_bytes = fh.read()
+        request = urllib.request.Request(
+            DEFAULT_AUDIO_URL,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        with urllib.request.urlopen(request, timeout=20) as response:
+            audio_bytes = response.read()
+        waveform, sr = librosa.load(io.BytesIO(audio_bytes), sr=None, mono=True)
+        max_samples = int(MAX_RECORD_SECONDS * sr)
+        if len(waveform) > max_samples:
+            waveform = waveform[:max_samples]
         return waveform, sr, audio_bytes
     except Exception:
         return None, None, None
@@ -575,6 +601,28 @@ def normalize_to_unit(array: np.ndarray) -> np.ndarray:
     if a_max > a_min:
         return (array - a_min) / (a_max - a_min)
     return np.zeros_like(array, dtype=np.float32)
+
+
+def normalize_to_unit_robust(
+    array: np.ndarray,
+    lower_percentile: float = 1.0,
+    upper_percentile: float = 99.0,
+) -> np.ndarray:
+    """Robustly map values to [0, 1] using global percentiles."""
+    arr = np.asarray(array, dtype=np.float64)
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return np.zeros_like(arr, dtype=np.float32)
+
+    lo = float(np.percentile(finite, lower_percentile))
+    hi = float(np.percentile(finite, upper_percentile))
+    if hi <= lo:
+        lo = float(finite.min())
+        hi = float(finite.max())
+    if hi <= lo:
+        return np.zeros_like(arr, dtype=np.float32)
+
+    return np.clip((arr - lo) / (hi - lo), 0.0, 1.0).astype(np.float32)
 
 
 def interpolate_to_shape(array: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
@@ -917,6 +965,22 @@ def apply_colormap(values: np.ndarray, colormap_name: str) -> np.ndarray:
     return (rgba[:, :, :3] * 255).astype(np.uint8)
 
 
+def reconstruct_channel_raw_and_spectrum(
+    magnitude_2d: np.ndarray,
+    phase_2d: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Reconstruct one spatial channel without local min-max normalization.
+
+    This is used for section-by-section synthesis so that all blocks can be
+    normalized only once at the final-image level.
+    """
+    Z = magnitude_2d * np.exp(1j * phase_2d)
+    Z_sym = enforce_hermitian_symmetry(Z)
+    f = np.real(np.fft.ifft2(Z_sym))
+    return f.astype(np.float64), Z_sym
+
+
 def reconstruct_channel_and_spectrum(
     magnitude_2d: np.ndarray,
     phase_2d: np.ndarray,
@@ -971,6 +1035,35 @@ def spectrum_to_centered_magnitude_phase(Z_sym: np.ndarray) -> tuple[np.ndarray,
     magnitude_centered = np.abs(Z_centered)
     phase_centered = np.angle(Z_centered)
     return magnitude_centered, phase_centered
+
+
+def audio_to_image_float(
+    features: dict,
+    target_size: int,
+    output_mode: str,
+) -> np.ndarray:
+    """
+    Generate an unnormalized floating-point image patch from extracted features.
+
+    Unlike audio_to_image(), this function does not apply a local [0, 1]
+    normalization after each IFFT. It is therefore suitable for sectioned
+    synthesis, where the final assembled image is normalized globally.
+    """
+    if output_mode == "Grayscale":
+        mag_2d_raw = build_magnitude_grid(features, target_size, band=None)
+        phase_2d_raw = build_phase_grid(features, target_size, band=None)
+        channel, _ = reconstruct_channel_raw_and_spectrum(mag_2d_raw, phase_2d_raw)
+        return np.stack([channel, channel, channel], axis=2)
+
+    bands = [(0.00, 1/3), (1/3, 2/3), (2/3, 1.00)]
+    channels = []
+    for band in bands:
+        mag_2d_raw = build_magnitude_grid(features, target_size, band=band)
+        phase_2d_raw = build_phase_grid(features, target_size, band=band)
+        channel, _ = reconstruct_channel_raw_and_spectrum(mag_2d_raw, phase_2d_raw)
+        channels.append(channel)
+
+    return np.stack(channels, axis=2)
 
 
 def audio_to_image(
@@ -1100,6 +1193,25 @@ def recursive_chronological_layout(
     return first + second
 
 
+def fit_square_patch_to_rect_float(patch: np.ndarray, rect_w: int, rect_h: int) -> np.ndarray:
+    """Fit a floating square patch to a rectangular block by centered crop/resize."""
+    rect_w = max(1, int(rect_w))
+    rect_h = max(1, int(rect_h))
+    patch = np.asarray(patch, dtype=np.float64)
+    h, w = patch.shape[:2]
+
+    crop_w = min(rect_w, w)
+    crop_h = min(rect_h, h)
+    x0 = max(0, (w - crop_w) // 2)
+    y0 = max(0, (h - crop_h) // 2)
+    cropped = patch[y0:y0 + crop_h, x0:x0 + crop_w]
+
+    if cropped.shape[1] == rect_w and cropped.shape[0] == rect_h:
+        return cropped.astype(np.float64)
+
+    return resize_float_image_to_size(cropped, rect_w, rect_h)
+
+
 def fit_square_patch_to_rect(patch: np.ndarray, rect_w: int, rect_h: int) -> np.ndarray:
     """
     Fit a generated square patch to a rectangular block.
@@ -1144,6 +1256,128 @@ def draw_block_borders(image: np.ndarray, rectangles: list[dict[str, int]]) -> n
     return out
 
 
+def resize_float_image_to_size(image: np.ndarray, width: int, height: int) -> np.ndarray:
+    """Resize a floating RGB image to an arbitrary size with bicubic interpolation."""
+    width = max(1, int(width))
+    height = max(1, int(height))
+    image = np.asarray(image, dtype=np.float64)
+    if image.shape[0] == height and image.shape[1] == width:
+        return image
+
+    zoom_y = height / max(1, image.shape[0])
+    zoom_x = width / max(1, image.shape[1])
+    if image.ndim == 2:
+        resized = scipy.ndimage.zoom(image, (zoom_y, zoom_x), order=3)
+    else:
+        resized = scipy.ndimage.zoom(image, (zoom_y, zoom_x, 1.0), order=3)
+
+    return resized[:height, :width].astype(np.float64)
+
+
+def resize_float_image_to_square(image: np.ndarray, size: int) -> np.ndarray:
+    """Resize a floating RGB image to a square size."""
+    size = max(1, int(size))
+    return resize_float_image_to_size(image, size, size)
+
+
+def resize_image_to_square(image: np.ndarray, size: int) -> np.ndarray:
+    """Resize an RGB image to a square size using bicubic interpolation."""
+    size = max(1, int(size))
+    image = np.asarray(image, dtype=np.uint8)
+    if image.shape[0] == size and image.shape[1] == size:
+        return image
+    pil_img = Image.fromarray(image)
+    pil_img = pil_img.resize((size, size), Image.Resampling.BICUBIC)
+    return np.asarray(pil_img, dtype=np.uint8)
+
+
+def generate_section_patch(
+    section: np.ndarray,
+    sr: int,
+    patch_size: int,
+    output_mode: str,
+    wavelet_type: str,
+) -> np.ndarray:
+    """Generate one unnormalized floating-point square patch from one audio section."""
+    patch_size = max(8, int(patch_size))
+    features = extract_features(section, sr, wavelet_type=wavelet_type)
+    return audio_to_image_float(
+        features=features,
+        target_size=patch_size,
+        output_mode=output_mode,
+    )
+
+
+def finalize_sectioned_image(canvas_float: np.ndarray, output_mode: str) -> np.ndarray:
+    """
+    Apply one global robust normalization after all sections are assembled.
+
+    This avoids local per-section normalization, preserves stronger intensity
+    differences between sections, and gives a less flat final result.
+    """
+    canvas_float = np.asarray(canvas_float, dtype=np.float64)
+
+    if output_mode == "Grayscale":
+        gray = normalize_to_unit_robust(canvas_float[:, :, 0], 1.0, 99.0)
+        image = np.stack([gray, gray, gray], axis=2)
+    else:
+        channels = [
+            normalize_to_unit_robust(canvas_float[:, :, c], 1.0, 99.0)
+            for c in range(3)
+        ]
+        image = np.stack(channels, axis=2)
+
+    # Slight contrast lift after global normalization. This is intentionally
+    # global, not section-wise, so it increases relief without equalizing blocks.
+    image = np.clip(image, 0.0, 1.0) ** 0.85
+    return (image * 255.0).round().astype(np.uint8)
+
+
+def build_layout_index_map(target_size: int, n_sections: int, section_layout: str) -> np.ndarray | None:
+    """
+    Build a dense section-index map for mask-based layouts.
+
+    The treemap layout is handled separately because its blocks may have
+    different rectangle sizes. All other layouts return an (N, N) integer map
+    whose value at each pixel is the chronological section index assigned to
+    that pixel.
+    """
+    n = int(target_size)
+    k = max(1, int(n_sections))
+
+    if section_layout == "Chronological treemap":
+        return None
+
+    y, x = np.indices((n, n), dtype=np.float64)
+
+    if section_layout == "Clockwise circular slices":
+        center = (n - 1.0) / 2.0
+        # Clockwise angle measured from the vertical upward direction.
+        theta = np.arctan2(x - center, center - y)
+        theta = np.where(theta < 0.0, theta + 2.0 * np.pi, theta)
+        return np.clip(np.floor(theta / (2.0 * np.pi) * k).astype(int), 0, k - 1)
+
+    if section_layout == "Concentric circles":
+        center = (n - 1.0) / 2.0
+        radius = np.sqrt((x - center) ** 2 + (y - center) ** 2)
+        radius_max = max(1.0, float(radius.max()))
+        return np.clip(np.floor(radius / radius_max * k).astype(int), 0, k - 1)
+
+    if section_layout == "Concentric squares":
+        center = (n - 1.0) / 2.0
+        radius = np.maximum(np.abs(x - center), np.abs(y - center))
+        radius_max = max(1.0, float(radius.max()))
+        return np.clip(np.floor(radius / radius_max * k).astype(int), 0, k - 1)
+
+    if section_layout == "Vertical strips":
+        return np.clip(np.floor(x / max(1.0, float(n)) * k).astype(int), 0, k - 1)
+
+    if section_layout == "Horizontal strips":
+        return np.clip(np.floor(y / max(1.0, float(n)) * k).astype(int), 0, k - 1)
+
+    return None
+
+
 def generate_sectioned_image(
     waveform: np.ndarray,
     sr: int,
@@ -1151,45 +1385,98 @@ def generate_sectioned_image(
     output_mode: str,
     wavelet_type: str,
     n_sections: int,
+    section_layout: str = "None",
     progress_callback=None,
 ) -> np.ndarray:
     """
     Generate a final square image by processing temporal sections sequentially.
 
-    Each audio section generates one local image patch. The patch is placed in
-    the deterministic chronological treemap rectangle assigned to that section.
-    No blending is applied in this first version, so the block structure remains
-    deliberately visible.
+    Available section-combination layouts:
+        - None: the whole signal generates one image, with no temporal sectioning.
+        - Chronological treemap: the recursive equal-area block layout.
+          Each local patch is computed near its target block size.
+        - Clockwise circular slices: chronological angular sectors around the
+          center. Each section patch is computed at half the final side length
+          (one quarter of the final pixel count), then resized and cropped by
+          its angular mask.
+        - Concentric circles: chronological circular rings with the first
+          section at the center and later sections moving outward.
+        - Concentric squares: chronological square rings with the first
+          section at the center and later sections moving outward.
+        - Vertical strips: chronological left-to-right rectangular strips.
+        - Horizontal strips: chronological top-to-bottom rectangular strips.
+
+    No explicit contour is drawn between sections. Boundaries are visible only
+    through the discontinuity between independently generated section images.
     """
     target_size = int(target_size)
     n_sections = max(1, int(n_sections))
-    sections = split_waveform_into_sections(waveform, n_sections)
-    rectangles = recursive_chronological_layout(0, 0, target_size, target_size, 0, n_sections)
+    section_layout = section_layout if section_layout in SECTION_LAYOUT_OPTIONS else "None"
 
-    canvas = np.zeros((target_size, target_size, 3), dtype=np.uint8)
-
-    for idx, rect in enumerate(rectangles):
-        section = sections[rect["section"]]
-        local_size = max(8, int(max(rect["w"], rect["h"])))
-
-        features = extract_features(section, sr, wavelet_type=wavelet_type)
-        patch, _, _ = audio_to_image(
-            features=features,
-            target_size=local_size,
+    if section_layout == "None":
+        patch = generate_section_patch(
+            section=waveform,
+            sr=sr,
+            patch_size=target_size,
             output_mode=output_mode,
-            colormap_name="gray",
+            wavelet_type=wavelet_type,
         )
-        patch_rect = fit_square_patch_to_rect(patch, rect["w"], rect["h"])
+        if progress_callback is not None:
+            progress_callback(1, 1)
+        return finalize_sectioned_image(patch, output_mode)
 
-        y0, x0 = rect["y"], rect["x"]
-        y1, x1 = y0 + rect["h"], x0 + rect["w"]
-        canvas[y0:y1, x0:x1] = patch_rect[:rect["h"], :rect["w"]]
+    sections = split_waveform_into_sections(waveform, n_sections)
+    canvas = np.zeros((target_size, target_size, 3), dtype=np.float64)
+
+    if section_layout == "Chronological treemap":
+        rectangles = recursive_chronological_layout(0, 0, target_size, target_size, 0, n_sections)
+
+        for idx, rect in enumerate(rectangles):
+            section = sections[rect["section"]]
+            local_size = max(8, int(max(rect["w"], rect["h"])))
+            patch = generate_section_patch(
+                section=section,
+                sr=sr,
+                patch_size=local_size,
+                output_mode=output_mode,
+                wavelet_type=wavelet_type,
+            )
+            patch_rect = fit_square_patch_to_rect_float(patch, rect["w"], rect["h"])
+
+            y0, x0 = rect["y"], rect["x"]
+            y1, x1 = y0 + rect["h"], x0 + rect["w"]
+            canvas[y0:y1, x0:x1] = patch_rect[:rect["h"], :rect["w"]]
+
+            if progress_callback is not None:
+                progress_callback(idx + 1, n_sections)
+
+        return finalize_sectioned_image(canvas, output_mode)
+
+    index_map = build_layout_index_map(target_size, n_sections, section_layout)
+    if index_map is None:
+        raise ValueError(f"Unsupported section layout: {section_layout}")
+
+    if section_layout == "Clockwise circular slices":
+        patch_size = max(8, target_size // 2)
+    else:
+        patch_size = target_size
+
+    for idx, section in enumerate(sections):
+        patch = generate_section_patch(
+            section=section,
+            sr=sr,
+            patch_size=patch_size,
+            output_mode=output_mode,
+            wavelet_type=wavelet_type,
+        )
+        patch_full = resize_float_image_to_square(patch, target_size)
+        mask = index_map == idx
+        canvas[mask] = patch_full[mask]
 
         if progress_callback is not None:
             progress_callback(idx + 1, n_sections)
 
-    return canvas
-
+    return finalize_sectioned_image(canvas, output_mode)
 
 def output_image_fourier_to_display_images(image_rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """
@@ -1279,7 +1566,7 @@ def fourier_grid_to_display_image(grid: np.ndarray, colormap: str, width: int = 
 
 def configure_page() -> None:
     st.set_page_config(
-        page_title="SoundCanvas",
+        page_title="Audio Visualization",
         layout="wide",
         initial_sidebar_state="collapsed",
     )
@@ -1516,7 +1803,7 @@ def render_app_tab() -> None:
                         st.session_state.last_audio_context = None
                         st.session_state.results = None
                         st.rerun()
-                    st.caption("Default sample: trumpet (librosa built-in example)")
+                    st.caption(f"Default sample: {DEFAULT_AUDIO_TITLE} — {DEFAULT_AUDIO_DESCRIPTION}")
                     st.audio(def_bytes)
                 else:
                     st.error("The default audio sample could not be loaded.")
@@ -1594,6 +1881,18 @@ def render_app_tab() -> None:
                 on_change=clear_results,
             )
 
+            section_layout = st.selectbox(
+                "Section layout",
+                options=SECTION_LAYOUT_OPTIONS,
+                index=0,
+                key="section_layout",
+                on_change=clear_results,
+                help=(
+                    "Choose how chronological audio sections are combined into "
+                    "the final square image."
+                ),
+            )
+
             if waveform_preview is None or sr_preview is None:
                 n_sections = 1
                 st.info(
@@ -1622,20 +1921,36 @@ def render_app_tab() -> None:
                 n_sections_default = min(DEFAULT_SECTIONS, k_max)
                 st.session_state.last_audio_context = audio_context
 
-                n_sections = st.slider(
-                    "Number of sections",
-                    min_value=1,
-                    max_value=k_max,
-                    value=n_sections_default,
-                    step=1,
-                    key=n_sections_key,
-                    on_change=clear_results,
-                    help=(
-                        "The signal is split into chronological sections. Each section "
-                        "generates one visible block of the final image. The maximum "
-                        "depends on the number of samples and the output image size."
-                    ),
-                )
+                if section_layout == "None":
+                    n_sections = 1
+                    st.slider(
+                        "Number of sections",
+                        min_value=1,
+                        max_value=max(1, k_max),
+                        value=1,
+                        step=1,
+                        key=f"n_sections_disabled_{slider_context}",
+                        disabled=True,
+                        help=(
+                            "Sectioning is disabled when Section layout is set to None. "
+                            "The whole signal is used to generate a single image."
+                        ),
+                    )
+                else:
+                    n_sections = st.slider(
+                        "Number of sections",
+                        min_value=1,
+                        max_value=k_max,
+                        value=n_sections_default,
+                        step=1,
+                        key=n_sections_key,
+                        on_change=clear_results,
+                        help=(
+                            "The signal is split into chronological sections. Each section "
+                            "generates one visible block of the final image. The maximum "
+                            "depends on the number of samples and the output image size."
+                        ),
+                    )
 
                 st.caption(
                     f"Samples: {n_samples_preview} · SR: {sr_context} Hz · "
@@ -1666,7 +1981,7 @@ def render_app_tab() -> None:
             st.error("Could not decode the audio file.")
         else:
             k_max_runtime = compute_max_sections(len(waveform), target_size)
-            n_sections_runtime = min(max(1, int(n_sections)), k_max_runtime)
+            n_sections_runtime = 1 if section_layout == "None" else min(max(1, int(n_sections)), k_max_runtime)
 
             with col2:
                 progress_text = st.empty()
@@ -1688,6 +2003,7 @@ def render_app_tab() -> None:
                     output_mode=output_mode,
                     wavelet_type=wavelet_type,
                     n_sections=n_sections_runtime,
+                    section_layout=section_layout,
                     progress_callback=update_progress,
                 )
 
@@ -1711,6 +2027,7 @@ def render_app_tab() -> None:
                 "sr": sr,
                 "n_samples": len(waveform),
                 "n_sections": n_sections_runtime,
+                "section_layout": section_layout,
                 "output_mode": output_mode,
             }
 
@@ -1725,7 +2042,7 @@ def render_app_tab() -> None:
             st.download_button(
                 "Download image (PNG)",
                 data=results["png_bytes"],
-                file_name="soundcanvas_output.png",
+                file_name="output.png",
                 mime="image/png",
                 width="stretch",
             )
@@ -1746,7 +2063,8 @@ def render_app_tab() -> None:
                     f'Duration: {results["duration"]:.2f} s &nbsp;·&nbsp; '
                     f'SR: {results["sr"]} Hz &nbsp;·&nbsp; '
                     f'Samples: {results["n_samples"]} &nbsp;·&nbsp; '
-                    f'Sections: {results["n_sections"]}'
+                    f'Sections: {results["n_sections"]} &nbsp;·&nbsp; '
+                    f'Layout: {html.escape(results.get("section_layout", "None"))}'
                     f'</p>',
                     unsafe_allow_html=True,
                 )
