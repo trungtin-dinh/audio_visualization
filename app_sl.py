@@ -2044,6 +2044,9 @@ def init_session_state() -> None:
         "audio_source":  "Default sample",
         "last_audio_context": None,
         "results":       None,
+        "run_in_progress": False,
+        "run_requested": False,
+        "last_run_status": None,
         "doc_fr_title":  DOC_FR_TITLES[0],
         "doc_en_title":  DOC_EN_TITLES[0],
     }
@@ -2054,14 +2057,25 @@ def init_session_state() -> None:
 
 def clear_audio() -> None:
     """Invalidate stored audio and all downstream results."""
-    st.session_state.audio_bytes   = None
+    st.session_state.audio_bytes = None
     st.session_state.using_default = False
     st.session_state.last_audio_context = None
-    st.session_state.results       = None
+    st.session_state.results = None
+    st.session_state.run_in_progress = False
+    st.session_state.run_requested = False
+    st.session_state.last_run_status = None
 
 
 def clear_results() -> None:
     st.session_state.results = None
+    st.session_state.last_run_status = None
+
+
+def request_run() -> None:
+    """Trigger a run and lock the Run button until the computation finishes."""
+    st.session_state.run_requested = True
+    st.session_state.run_in_progress = True
+    st.session_state.last_run_status = None
 
 
 def set_doc_section(state_key: str, title: str) -> None:
@@ -2331,14 +2345,21 @@ def render_app_tab() -> None:
                     st.session_state.audio_bytes = None
                     st.session_state.using_default = False
 
-        run_clicked = st.button(
+        st.button(
             "Run",
             type="primary",
             width="stretch",
-            disabled=(st.session_state.audio_bytes is None),
+            disabled=(st.session_state.audio_bytes is None or st.session_state.run_in_progress),
+            on_click=request_run,
         )
 
     with output_col:
+        progress_status_placeholder = st.empty()
+        progress_bar_placeholder = st.empty()
+
+        if st.session_state.last_run_status == "Done":
+            progress_status_placeholder.success("Done — 100%")
+
         output_box = st.container(border=True)
         with output_box:
             st.markdown("#### Output image")
@@ -2491,27 +2512,28 @@ def render_app_tab() -> None:
     # ========================================================
     # Run computation
     # ========================================================
-    if run_clicked and st.session_state.audio_bytes is not None:
+    if st.session_state.run_requested and st.session_state.audio_bytes is not None:
+        progress_status_placeholder.info("Preparing computation — 0%")
+        progress_bar = progress_bar_placeholder.progress(0)
+
         with st.spinner("Loading audio…"):
             waveform, sr = load_audio(st.session_state.audio_bytes)
 
         if waveform is None or sr is None:
+            st.session_state.run_in_progress = False
+            st.session_state.run_requested = False
+            st.session_state.last_run_status = None
+            progress_bar_placeholder.empty()
+            progress_status_placeholder.error("Could not decode the audio file.")
             st.error("Could not decode the audio file.")
         else:
             k_max_runtime = compute_max_sections(len(waveform), target_size)
             n_sections_runtime = 1 if section_layout == "None" else min(max(1, int(n_sections)), k_max_runtime)
 
-            with output_box:
-                progress_text = st.empty()
-                progress_bar = st.progress(0.0)
-
             def update_progress(done: int, total: int) -> None:
-                with output_box:
-                    progress_text.markdown(
-                        f'<p class="small-muted">Computing section {done}/{total}…</p>',
-                        unsafe_allow_html=True,
-                    )
-                    progress_bar.progress(done / max(1, total))
+                percent = int(round(100.0 * done / max(1, total)))
+                progress_status_placeholder.info(f"Computing section {done}/{total} — {percent}%")
+                progress_bar.progress(percent)
 
             with st.spinner("Generating section-by-section image…"):
                 image_rgb = generate_sectioned_image(
@@ -2526,8 +2548,8 @@ def render_app_tab() -> None:
                     params=synthesis_params,
                 )
 
-            progress_bar.empty()
-            progress_text.empty()
+            progress_bar.progress(100)
+            progress_status_placeholder.success("Done — 100%")
 
             st.session_state.results = {
                 "generated_image": image_rgb,
@@ -2540,19 +2562,15 @@ def render_app_tab() -> None:
                 "output_mode": output_mode,
             }
 
-            with output_box:
-                output_placeholder.empty()
-                download_placeholder.empty()
-                with output_placeholder.container():
-                    render_image_output("Generated image", image_rgb)
-                with download_placeholder.container():
-                    st.download_button(
-                        "Download image (PNG)",
-                        data=st.session_state.results["png_bytes"],
-                        file_name="output.png",
-                        mime="image/png",
-                        width="stretch",
-                    )
+            st.session_state.run_in_progress = False
+            st.session_state.run_requested = False
+            st.session_state.last_run_status = "Done"
+
+            # The Run button was rendered earlier in this script pass while
+            # run_in_progress was still True. Force one final rerun so the
+            # button is immediately rendered as interactive again after the
+            # computation has finished.
+            st.rerun()
 
 
 
