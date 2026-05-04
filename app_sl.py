@@ -2704,7 +2704,7 @@ def render_parameter_tabs(
                 seg_method = st.selectbox(
                     "Method",
                     SEGMENTATION_METHODS,
-                    index=0,
+                    index=3,
                     key="segmentation_method",
                     on_change=clear_results,
                     help=(
