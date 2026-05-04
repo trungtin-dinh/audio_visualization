@@ -11,6 +11,7 @@ import numpy as np
 import scipy.interpolate
 import scipy.ndimage
 import scipy.signal
+import scipy.cluster.vq
 import matplotlib.cm as matplotlib_cm
 import streamlit as st
 from PIL import Image
@@ -30,6 +31,21 @@ try:
 except Exception:
     librosa = None
     LIBROSA_AVAILABLE = False
+
+try:
+    from skimage import segmentation as skimage_seg
+    SKIMAGE_AVAILABLE = True
+except Exception:
+    skimage_seg = None
+    SKIMAGE_AVAILABLE = False
+
+try:
+    from sklearn.cluster import MeanShift, estimate_bandwidth
+    SKLEARN_AVAILABLE = True
+except Exception:
+    MeanShift = None
+    estimate_bandwidth = None
+    SKLEARN_AVAILABLE = False
 
 
 # ============================================================
@@ -130,8 +146,9 @@ W_PHASE_ZCR:       float = 0.05
 # Morlet total: 0.30+0.20+0.20+0.15+0.10+0.05 = 1.00
 # Ricker total (redistribute CWT weight 0.20 to STFT): 0.40+0.30+0+0.15+0.10+0.05 = 1.00
 
-WAVELET_OPTIONS     = ["Morlet", "Ricker (Mexican hat)"]
-OUTPUT_MODE_OPTIONS = ["Grayscale", "Colors", "Black mix", "Luma mix", "Watershed"]
+WAVELET_OPTIONS        = ["Morlet", "Ricker (Mexican hat)"]
+OUTPUT_MODE_OPTIONS    = ["Grayscale", "Colors", "Black mix", "Luma mix", "Watershed"]
+SEGMENTATION_METHODS   = ["Watershed", "K-means", "SLIC", "Felzenszwalb", "Mean-shift"]
 SECTION_LAYOUT_OPTIONS = [
     "None",
     "Chronological treemap",
@@ -449,7 +466,7 @@ def cwt_compat(data: np.ndarray, wavelet_fn, widths: np.ndarray) -> np.ndarray:
 # Feature extraction
 # ============================================================
 
-def extract_features(waveform: np.ndarray, sr: int, wavelet_type: str = "Morlet", params: dict | None = None) -> dict:
+def extract_features(waveform: np.ndarray, sr: int, wavelet_type: str = "Morlet", params: dict | None = None, step_callback=None) -> dict:
     """
     Extract a comprehensive feature set from a mono waveform.
 
@@ -522,6 +539,8 @@ def extract_features(waveform: np.ndarray, sr: int, wavelet_type: str = "Morlet"
     features["stft_resolutions"] = resolutions
 
     for n_fft in resolutions:
+        if step_callback is not None:
+            step_callback(f"STFT  N={n_fft}")
         hop = n_fft // 4
         stft = librosa.stft(
             waveform, n_fft=n_fft, hop_length=hop, window="hann", center=True,
@@ -530,7 +549,6 @@ def extract_features(waveform: np.ndarray, sr: int, wavelet_type: str = "Morlet"
         features[f"phase_{n_fft}"] = np.angle(stft)
 
     # --- CWT ---
-    # Downsample waveform for CWT to bound computation time
     cwt_max_samples = int(get_param(params, "cwt_max_samples", CWT_MAX_SAMPLES))
     cwt_n_scales = int(get_param(params, "cwt_n_scales", CWT_N_SCALES))
     n_mels = int(get_param(params, "n_mels", N_MELS))
@@ -543,6 +561,8 @@ def extract_features(waveform: np.ndarray, sr: int, wavelet_type: str = "Morlet"
     waveform_cwt = waveform[::step_cwt].copy()
     n_cwt = len(waveform_cwt)
 
+    if step_callback is not None:
+        step_callback(f"CWT  ({wavelet_type},  S={cwt_n_scales})")
     max_scale = min(512, n_cwt // 2)
     cwt_scales = np.geomspace(1.0, max(1.0, float(max_scale)), num=cwt_n_scales)
 
@@ -552,23 +572,32 @@ def extract_features(waveform: np.ndarray, sr: int, wavelet_type: str = "Morlet"
         wavelet_fn = ricker_compat
 
     cwt_coeffs = cwt_compat(waveform_cwt, wavelet_fn, cwt_scales)
-    # cwt_coeffs: (CWT_N_SCALES, n_cwt), complex for Morlet, real for Ricker
 
     features["cwt_magnitude"] = np.abs(cwt_coeffs)
     features["cwt_phase"] = np.angle(cwt_coeffs) if wavelet_type == "Morlet" else None
 
     # --- Perceptual features ---
+    if step_callback is not None:
+        step_callback(f"Mel spectrogram  (B={n_mels})")
     features["mel"] = librosa.feature.melspectrogram(
         y=waveform, sr=sr, n_mels=n_mels, hop_length=hop_default,
     )
+
+    if step_callback is not None:
+        step_callback("Chroma")
     features["chroma"] = librosa.feature.chroma_stft(
         y=waveform, sr=sr, hop_length=hop_default,
     )
+
+    if step_callback is not None:
+        step_callback(f"MFCC  (C={n_mfcc})")
     features["mfcc"] = librosa.feature.mfcc(
         y=waveform, sr=sr, n_mfcc=n_mfcc, hop_length=hop_default,
     )
 
     # --- Temporal descriptors ---
+    if step_callback is not None:
+        step_callback("Temporal descriptors")
     features["spectral_centroid"] = librosa.feature.spectral_centroid(
         y=waveform, sr=sr, hop_length=hop_default,
     )[0]
@@ -590,6 +619,9 @@ def extract_features(waveform: np.ndarray, sr: int, wavelet_type: str = "Morlet"
     features["onset_strength"] = librosa.onset.onset_strength(
         y=waveform, sr=sr, hop_length=hop_default,
     )
+
+    if step_callback is not None:
+        step_callback("Building Fourier grids")
 
     return features
 
@@ -1306,10 +1338,13 @@ def generate_section_patch(
     output_mode: str,
     wavelet_type: str,
     params: dict | None = None,
+    step_callback=None,
 ) -> np.ndarray:
     """Generate one unnormalized floating-point square patch from one audio section."""
     patch_size = max(8, int(patch_size))
-    features = extract_features(section, sr, wavelet_type=wavelet_type, params=params)
+    features = extract_features(section, sr, wavelet_type=wavelet_type, params=params, step_callback=step_callback)
+    if step_callback is not None:
+        step_callback("IFFT2 reconstruction")
     return audio_to_image_float(
         features=features,
         target_size=patch_size,
@@ -1545,9 +1580,221 @@ def watershed_flood_from_markers(gradient: np.ndarray, markers: np.ndarray) -> n
     return labels
 
 
+def _apply_region_coloring_and_boundaries(
+    image: np.ndarray,
+    labels: np.ndarray,
+    params: dict | None = None,
+) -> np.ndarray:
+    """
+    Shared post-processing for any pixel-level segmentation label map.
+
+    Given a uint8 (H, W, 3) image and an integer (H, W) label array, assigns
+    each region a representative color (random pixel, mean, or median) and
+    optionally draws boundaries.
+
+    Always defaults to random-pixel coloring: for noise-like images the mean/
+    median of any large region converges toward grey, so selecting a single
+    actual pixel from the region preserves the full color diversity of the
+    source image.
+    """
+    image = np.asarray(image, dtype=np.uint8)
+    labels = np.asarray(labels, dtype=np.int32)
+    h, w = image.shape[:2]
+
+    color_mode = str(get_param(params, "seg_region_color_mode", "Random pixel"))
+    seed = int(get_param(params, "seg_random_seed", 12345))
+    rng = np.random.default_rng(seed)
+    out = np.zeros_like(image, dtype=np.uint8)
+
+    unique_labels = np.unique(labels)
+    for lab in unique_labels:
+        ys, xs = np.where(labels == lab)
+        if ys.size == 0:
+            continue
+        region_colors = image[ys, xs].astype(np.float64)
+        if color_mode == "Mean color":
+            sampled = np.mean(region_colors, axis=0)
+        elif color_mode == "Median color":
+            sampled = np.median(region_colors, axis=0)
+        else:   # default: Random pixel
+            idx = int(rng.integers(0, ys.size))
+            sampled = image[ys[idx], xs[idx]].astype(np.float64)
+        out[ys, xs] = np.clip(sampled, 0.0, 255.0).round().astype(np.uint8)
+
+    # Boundaries
+    boundary = np.zeros((h, w), dtype=bool)
+    boundary[:, 1:]  |= labels[:, 1:]  != labels[:, :-1]
+    boundary[:, :-1] |= labels[:, 1:]  != labels[:, :-1]
+    boundary[1:, :]  |= labels[1:, :]  != labels[:-1, :]
+    boundary[:-1, :] |= labels[1:, :]  != labels[:-1, :]
+
+    boundary_style = str(get_param(params, "seg_boundary_style", "None"))
+    thickness = int(get_param(params, "seg_boundary_thickness", 0))
+    if thickness > 0:
+        boundary = scipy.ndimage.binary_dilation(boundary, iterations=thickness)
+
+    if boundary_style == "Black":
+        out[boundary] = 0
+    elif boundary_style == "Local mean":
+        window = int(get_param(params, "seg_boundary_mean_window", 5))
+        window = max(3, window | 1)   # ensure odd
+        local_mean = np.stack(
+            [scipy.ndimage.uniform_filter(out[:, :, c].astype(np.float64), size=window, mode="nearest")
+             for c in range(3)],
+            axis=2,
+        )
+        out[boundary] = np.clip(local_mean[boundary], 0.0, 255.0).round().astype(np.uint8)
+
+    return out
+
+
+def make_kmeans_region_image(image_rgb: np.ndarray, params: dict | None = None) -> np.ndarray:
+    """
+    Segment image_rgb via K-means clustering in RGB space (scipy.cluster.vq).
+
+    Pixels are reshaped to (N, 3), whitened, and clustered into k centroids.
+    Each pixel is assigned the label of its nearest centroid. Region color is
+    then chosen by _apply_region_coloring_and_boundaries (random pixel by
+    default to avoid grey convergence in noise-like images).
+    """
+    image = np.asarray(image_rgb, dtype=np.uint8)
+    h, w = image.shape[:2]
+
+    k = int(get_param(params, "kmeans_k", 120))
+    k = max(2, min(k, h * w))
+
+    pixels = image.reshape(-1, 3).astype(np.float32)
+    whitened = scipy.cluster.vq.whiten(pixels)
+
+    _, labels = scipy.cluster.vq.kmeans2(
+        whitened,
+        k=k,
+        iter=10,
+        minit="points",
+        seed=int(get_param(params, "seg_random_seed", 12345)),
+    )
+    label_map = labels.reshape(h, w).astype(np.int32)
+    return _apply_region_coloring_and_boundaries(image, label_map, params)
+
+
+def make_slic_region_image(image_rgb: np.ndarray, params: dict | None = None) -> np.ndarray:
+    """
+    Segment image_rgb using SLIC superpixels (skimage.segmentation.slic).
+
+    SLIC iteratively clusters pixels by proximity in a joint (R,G,B,x,y) space,
+    producing compact, roughly equal-area superpixels. The compactness parameter
+    controls the trade-off between color homogeneity and spatial regularity.
+    Falls back to K-means if scikit-image is unavailable.
+    """
+    if not SKIMAGE_AVAILABLE:
+        return make_kmeans_region_image(image_rgb, params)
+
+    image = np.asarray(image_rgb, dtype=np.uint8)
+    n_segments = int(get_param(params, "slic_n_segments", 120))
+    compactness = float(get_param(params, "slic_compactness", 10.0))
+    sigma = float(get_param(params, "slic_sigma", 1.0))
+
+    labels = skimage_seg.slic(
+        image,
+        n_segments=max(2, n_segments),
+        compactness=max(0.01, compactness),
+        sigma=max(0.0, sigma),
+        start_label=0,
+        channel_axis=2,
+    )
+    return _apply_region_coloring_and_boundaries(image, labels.astype(np.int32), params)
+
+
+def make_felzenszwalb_region_image(image_rgb: np.ndarray, params: dict | None = None) -> np.ndarray:
+    """
+    Segment image_rgb using Felzenszwalb's graph-based algorithm
+    (skimage.segmentation.felzenszwalb).
+
+    Merges pixels greedily using a minimum spanning tree: two pixels are merged
+    when the edge weight between them is small relative to the internal variation
+    of their component. The `scale` parameter directly controls region size:
+    larger values produce larger, fewer regions. The number of regions is
+    determined automatically.
+    Falls back to K-means if scikit-image is unavailable.
+    """
+    if not SKIMAGE_AVAILABLE:
+        return make_kmeans_region_image(image_rgb, params)
+
+    image = np.asarray(image_rgb, dtype=np.uint8)
+    scale    = float(get_param(params, "felz_scale",    100.0))
+    sigma    = float(get_param(params, "felz_sigma",      0.8))
+    min_size = int(get_param(params,   "felz_min_size",   20))
+
+    labels = skimage_seg.felzenszwalb(
+        image,
+        scale=max(1.0, scale),
+        sigma=max(0.0, sigma),
+        min_size=max(1, min_size),
+        channel_axis=2,
+    )
+    return _apply_region_coloring_and_boundaries(image, labels.astype(np.int32), params)
+
+
+def make_meanshift_region_image(image_rgb: np.ndarray, params: dict | None = None) -> np.ndarray:
+    """
+    Segment image_rgb using Mean-shift density estimation (sklearn.cluster.MeanShift).
+
+    Mean-shift is mode-seeking: it iteratively moves each sample toward the
+    local density maximum in feature space. The bandwidth controls the size of
+    the search window; larger bandwidth → fewer, larger regions.
+
+    Because mean-shift cost is O(N²), the image is downsampled to at most
+    64×64 for clustering, then labels are upsampled to the original size via
+    nearest-neighbor assignment (each original pixel is assigned to the cluster
+    of its spatially nearest downsampled pixel).
+    Falls back to K-means if scikit-learn is unavailable.
+    """
+    if not SKLEARN_AVAILABLE:
+        return make_kmeans_region_image(image_rgb, params)
+
+    image = np.asarray(image_rgb, dtype=np.uint8)
+    h, w = image.shape[:2]
+
+    max_side = int(get_param(params, "meanshift_max_side", 64))
+    max_side = max(16, min(max_side, 128))
+    scale = max(1, max(h, w) // max_side)
+    small = image[::scale, ::scale]
+    sh, sw = small.shape[:2]
+
+    pixels_small = small.reshape(-1, 3).astype(np.float32)
+    bw = float(get_param(params, "meanshift_bandwidth", 0.0))
+    if bw <= 0:
+        bw = float(estimate_bandwidth(pixels_small, quantile=0.2, n_samples=min(500, len(pixels_small))))
+    bw = max(1.0, bw)
+
+    ms = MeanShift(bandwidth=bw, bin_seeding=True, n_jobs=1)
+    ms.fit(pixels_small)
+    small_labels = ms.labels_.reshape(sh, sw).astype(np.int32)
+
+    # Upsample labels to original size (nearest-neighbor via repeat)
+    label_map = np.repeat(np.repeat(small_labels, scale, axis=0), scale, axis=1)
+    label_map = label_map[:h, :w]
+
+    return _apply_region_coloring_and_boundaries(image, label_map, params)
+
+
+def make_segmentation_image(image_rgb: np.ndarray, params: dict | None = None) -> np.ndarray:
+    """Dispatch to the segmentation method selected in params."""
+    method = str(get_param(params, "segmentation_method", "Watershed"))
+    if method == "K-means":
+        return make_kmeans_region_image(image_rgb, params)
+    if method == "SLIC":
+        return make_slic_region_image(image_rgb, params)
+    if method == "Felzenszwalb":
+        return make_felzenszwalb_region_image(image_rgb, params)
+    if method == "Mean-shift":
+        return make_meanshift_region_image(image_rgb, params)
+    return make_watershed_region_image(image_rgb, params)
+
+
 def make_watershed_region_image(image_rgb: np.ndarray, params: dict | None = None) -> np.ndarray:
     """
-    Convert an RGB image into a watershed-like region image with user controls.
+    Convert an RGB image into a watershed-segmented region image.
     """
     image = np.asarray(image_rgb, dtype=np.uint8)
     if image.ndim != 3 or image.shape[2] != 3:
@@ -1588,55 +1835,16 @@ def make_watershed_region_image(image_rgb: np.ndarray, params: dict | None = Non
 
     labels = watershed_flood_from_markers(gradient, markers)
 
-    color_mode = str(get_param(params, "watershed_region_color_mode", "Random pixel"))
-    seed = int(get_param(params, "watershed_random_seed", 12345))
-    rng = np.random.default_rng(seed)
-    out = np.zeros_like(image, dtype=np.uint8)
-
-    for lab in range(1, int(labels.max()) + 1):
-        ys, xs = np.where(labels == lab)
-        if ys.size == 0:
-            continue
-
-        region_colors = image[ys, xs].astype(np.float64)
-        if color_mode == "Mean color":
-            sampled_color = np.mean(region_colors, axis=0)
-        elif color_mode == "Median color":
-            sampled_color = np.median(region_colors, axis=0)
-        else:
-            idx = int(rng.integers(0, ys.size))
-            sampled_color = image[ys[idx], xs[idx]].astype(np.float64)
-
-        out[ys, xs] = np.clip(sampled_color, 0.0, 255.0).round().astype(np.uint8)
-
-    boundary = np.zeros((h, w), dtype=bool)
-    boundary[:, 1:] |= labels[:, 1:] != labels[:, :-1]
-    boundary[:, :-1] |= labels[:, 1:] != labels[:, :-1]
-    boundary[1:, :] |= labels[1:, :] != labels[:-1, :]
-    boundary[:-1, :] |= labels[1:, :] != labels[:-1, :]
-
-    boundary_style = str(get_param(params, "watershed_boundary_style", "None"))
-    thickness = int(get_param(params, "watershed_boundary_thickness", 0))
-    if thickness > 0:
-        boundary = scipy.ndimage.binary_dilation(boundary, iterations=thickness)
-
-    if boundary_style == "Black":
-        out[boundary] = 0
-    elif boundary_style == "Local mean":
-        window = int(get_param(params, "watershed_boundary_mean_window", 5))
-        if window % 2 == 0:
-            window += 1
-        window = max(3, window)
-        local_mean = np.stack(
-            [
-                scipy.ndimage.uniform_filter(out[:, :, c].astype(np.float64), size=window, mode="nearest")
-                for c in range(3)
-            ],
-            axis=2,
-        )
-        out[boundary] = np.clip(local_mean[boundary], 0.0, 255.0).round().astype(np.uint8)
-
-    return out
+    # Use unified coloring + boundary helper.
+    # Mirror watershed-specific param keys to the shared seg_ keys so the
+    # helper can read them, then delegate.
+    merged_params = dict(params or {})
+    merged_params.setdefault("seg_region_color_mode", str(get_param(params, "watershed_region_color_mode", "Random pixel")))
+    merged_params.setdefault("seg_random_seed",       int(get_param(params, "watershed_random_seed",       12345)))
+    merged_params.setdefault("seg_boundary_style",    str(get_param(params, "watershed_boundary_style",    "None")))
+    merged_params.setdefault("seg_boundary_thickness",int(get_param(params, "watershed_boundary_thickness",0)))
+    merged_params.setdefault("seg_boundary_mean_window", int(get_param(params, "watershed_boundary_mean_window", 5)))
+    return _apply_region_coloring_and_boundaries(image, labels, merged_params)
 
 
 def build_layout_index_map(target_size: int, n_sections: int, section_layout: str) -> np.ndarray | None:
@@ -1722,35 +1930,25 @@ def generate_sectioned_image(
     if output_mode in {"Black mix", "Luma mix", "Watershed"}:
         total_steps = 2 if section_layout == "None" else 2 * n_sections
 
-        def color_progress(done: int, total: int) -> None:
+        def color_progress(label: str, done: int, total: int) -> None:
             if progress_callback is not None:
-                progress_callback(done, total_steps)
+                progress_callback(f"[Color] {label}", done, total_steps)
 
-        def grayscale_progress(done: int, total: int) -> None:
+        def grayscale_progress(label: str, done: int, total: int) -> None:
             if progress_callback is not None:
-                progress_callback(total + done, total_steps)
+                progress_callback(f"[Grayscale] {label}", (total_steps // 2) + done, total_steps)
 
         color_image = generate_sectioned_image(
-            waveform=waveform,
-            sr=sr,
-            target_size=target_size,
-            output_mode="Colors",
-            wavelet_type=wavelet_type,
-            n_sections=n_sections,
-            section_layout=section_layout,
-            progress_callback=color_progress,
-            params=params,
+            waveform=waveform, sr=sr, target_size=target_size,
+            output_mode="Colors", wavelet_type=wavelet_type,
+            n_sections=n_sections, section_layout=section_layout,
+            progress_callback=color_progress, params=params,
         )
         grayscale_image = generate_sectioned_image(
-            waveform=waveform,
-            sr=sr,
-            target_size=target_size,
-            output_mode="Grayscale",
-            wavelet_type=wavelet_type,
-            n_sections=n_sections,
-            section_layout=section_layout,
-            progress_callback=grayscale_progress,
-            params=params,
+            waveform=waveform, sr=sr, target_size=target_size,
+            output_mode="Grayscale", wavelet_type=wavelet_type,
+            n_sections=n_sections, section_layout=section_layout,
+            progress_callback=grayscale_progress, params=params,
         )
 
         if output_mode == "Black mix":
@@ -1761,21 +1959,25 @@ def generate_sectioned_image(
         if output_mode == "Luma mix":
             return mixed_image
 
-        return make_watershed_region_image(mixed_image, params=params)
+        if progress_callback is not None:
+            seg_method = str(get_param(params, "segmentation_method", "Watershed"))
+            progress_callback(f"Segmentation ({seg_method})", total_steps, total_steps)
+        return make_segmentation_image(mixed_image, params=params)
 
     section_layout = section_layout if section_layout in SECTION_LAYOUT_OPTIONS else "None"
 
     if section_layout == "None":
+        def single_step_cb(label: str) -> None:
+            if progress_callback is not None:
+                progress_callback(label, 0, 1)
+
         patch = generate_section_patch(
-            section=waveform,
-            sr=sr,
-            patch_size=target_size,
-            output_mode=output_mode,
-            wavelet_type=wavelet_type,
-            params=params,
+            section=waveform, sr=sr, patch_size=target_size,
+            output_mode=output_mode, wavelet_type=wavelet_type,
+            params=params, step_callback=single_step_cb,
         )
         if progress_callback is not None:
-            progress_callback(1, 1)
+            progress_callback("Finalizing image", 1, 1)
         return finalize_sectioned_image(patch, output_mode, params=params)
 
     sections = split_waveform_into_sections(waveform, n_sections)
@@ -1785,15 +1987,18 @@ def generate_sectioned_image(
         rectangles = recursive_chronological_layout(0, 0, target_size, target_size, 0, n_sections)
 
         for idx, rect in enumerate(rectangles):
+            def make_step_cb(i=idx):
+                def cb(label: str) -> None:
+                    if progress_callback is not None:
+                        progress_callback(f"Section {i+1}/{n_sections} · {label}", i, n_sections)
+                return cb
+
             section = sections[rect["section"]]
             local_size = max(8, int(max(rect["w"], rect["h"])))
             patch = generate_section_patch(
-                section=section,
-                sr=sr,
-                patch_size=local_size,
-                output_mode=output_mode,
-                wavelet_type=wavelet_type,
-                params=params,
+                section=section, sr=sr, patch_size=local_size,
+                output_mode=output_mode, wavelet_type=wavelet_type,
+                params=params, step_callback=make_step_cb(),
             )
             patch_rect = fit_square_patch_to_rect_float(patch, rect["w"], rect["h"])
 
@@ -1802,7 +2007,7 @@ def generate_sectioned_image(
             canvas[y0:y1, x0:x1] = patch_rect[:rect["h"], :rect["w"]]
 
             if progress_callback is not None:
-                progress_callback(idx + 1, n_sections)
+                progress_callback(f"Section {idx+1}/{n_sections} · done", idx + 1, n_sections)
 
         return finalize_sectioned_image(canvas, output_mode, params=params)
 
@@ -1816,20 +2021,23 @@ def generate_sectioned_image(
         patch_size = target_size
 
     for idx, section in enumerate(sections):
+        def make_step_cb(i=idx):
+            def cb(label: str) -> None:
+                if progress_callback is not None:
+                    progress_callback(f"Section {i+1}/{n_sections} · {label}", i, n_sections)
+            return cb
+
         patch = generate_section_patch(
-            section=section,
-            sr=sr,
-            patch_size=patch_size,
-            output_mode=output_mode,
-            wavelet_type=wavelet_type,
-            params=params,
+            section=section, sr=sr, patch_size=patch_size,
+            output_mode=output_mode, wavelet_type=wavelet_type,
+            params=params, step_callback=make_step_cb(),
         )
         patch_full = resize_float_image_to_square(patch, target_size)
         mask = index_map == idx
         canvas[mask] = patch_full[mask]
 
         if progress_callback is not None:
-            progress_callback(idx + 1, n_sections)
+            progress_callback(f"Section {idx+1}/{n_sections} · done", idx + 1, n_sections)
 
     return finalize_sectioned_image(canvas, output_mode, params=params)
 
@@ -2003,7 +2211,7 @@ def configure_page() -> None:
         div[data-testid="stButton"] > button[kind="primary"] {
             font-weight: 700;
             letter-spacing: 0.03em;
-            text-transform: uppercase;
+            text-transform: none !important;
         }
         div[data-testid="stButton"] > button[kind="primary"]:not([disabled]):hover {
             transform: translateY(-1px);
@@ -2020,7 +2228,6 @@ def configure_page() -> None:
             font-weight: 700;
             font-size: 0.9rem;
             letter-spacing: 0.04em;
-            text-transform: uppercase;
         }
 
         /* ---- Captions / muted text ---- */
@@ -2151,16 +2358,17 @@ def configure_page() -> None:
 
 def init_session_state() -> None:
     defaults: dict = {
-        "audio_bytes":   None,
-        "using_default": False,
-        "audio_source":  "Default sample",
+        "audio_bytes":    None,
+        "using_default":  False,
+        "audio_source":   "Default sample",
+        "audio_filename": None,
         "last_audio_context": None,
-        "results":       None,
+        "results":        None,
         "run_in_progress": False,
-        "run_requested": False,
+        "run_requested":  False,
         "last_run_status": None,
-        "doc_fr_title":  DOC_FR_TITLES[0],
-        "doc_en_title":  DOC_EN_TITLES[0],
+        "doc_fr_title":   DOC_FR_TITLES[0],
+        "doc_en_title":   DOC_EN_TITLES[0],
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -2171,6 +2379,7 @@ def clear_audio() -> None:
     """Invalidate stored audio and all downstream results."""
     st.session_state.audio_bytes = None
     st.session_state.using_default = False
+    st.session_state.audio_filename = None
     st.session_state.last_audio_context = None
     st.session_state.results = None
     st.session_state.run_in_progress = False
@@ -2192,6 +2401,24 @@ def request_run() -> None:
 
 def set_doc_section(state_key: str, title: str) -> None:
     st.session_state[state_key] = title
+
+
+def build_download_filename(audio_filename: str | None) -> str:
+    """
+    Build the PNG download filename as "audivisio-<stem>.png".
+
+    The stem is taken from the stored audio filename (extension stripped),
+    lowercased, non-alphanumeric characters replaced by hyphens, and
+    truncated to 32 characters so the full filename stays readable.
+    Falls back to "audivisio" when no filename is available.
+    """
+    if not audio_filename:
+        return "audivisio.png"
+    stem = Path(audio_filename).stem
+    # Sanitize: keep alphanumerics and hyphens, collapse runs of non-alnum
+    sanitized = re.sub(r"[^a-zA-Z0-9]+", "-", stem).strip("-").lower()
+    sanitized = sanitized[:32].rstrip("-") or "audio"
+    return f"audivisio-{sanitized}.png"
 
 
 # ============================================================
@@ -2222,6 +2449,33 @@ def render_documentation_tab(titles: list[str], sections: dict[str, str], state_
                 args=(state_key, title),
             )
     with right_col:
+        # Animated loading bar — plays once each time this column re-renders
+        # (on tab switch or section click). Pure CSS, no blocking sleep needed.
+        st.markdown(
+            """
+            <style>
+            @keyframes _doc_load {
+                from { width: 0%; opacity: 1; }
+                to   { width: 100%; opacity: 0; }
+            }
+            ._doc_progress_wrap {
+                height: 3px;
+                background: rgba(255,75,75,0.12);
+                border-radius: 2px;
+                overflow: hidden;
+                margin-bottom: 1.1rem;
+            }
+            ._doc_progress_bar {
+                height: 100%;
+                background: #FF4B4B;
+                border-radius: 2px;
+                animation: _doc_load 0.55s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+            }
+            </style>
+            <div class="_doc_progress_wrap"><div class="_doc_progress_bar"></div></div>
+            """,
+            unsafe_allow_html=True,
+        )
         st.markdown(sections[st.session_state[state_key]])
 
 
@@ -2422,7 +2676,7 @@ def render_parameter_tabs(
 
     # ── Tab 4 · Effects ───────────────────────────────────────────────────────
     with tab_effects:
-        eff_left, eff_mid, eff_right = st.columns(3, gap="large")
+        eff_left, eff_right = st.columns(2, gap="large")
 
         with eff_left:
             with st.container(border=True):
@@ -2430,41 +2684,103 @@ def render_parameter_tabs(
                 params["ink_class_choice"] = st.selectbox(
                     "Otsu class",
                     ["Automatic minority", "Dark class", "Bright class"],
-                    index=0,
-                    on_change=clear_results,
+                    index=0, on_change=clear_results,
                 )
-                params["ink_keep_percentile"]  = st.slider("Pixel density (%)", 1.0, 100.0, 50.0,  1.0,  on_change=clear_results)
-                params["ink_smoothing_sigma"]  = st.slider("Pre-smoothing σ",   0.0,  10.0,  0.0,  0.25, on_change=clear_results)
-                params["ink_thickness"]        = st.slider("Line thickness",     0,      8,    0,    1,   on_change=clear_results)
+                params["ink_keep_percentile"] = st.slider("Pixel density (%)", 1.0, 100.0, 50.0, 1.0, on_change=clear_results)
+                params["ink_smoothing_sigma"] = st.slider("Pre-smoothing σ",   0.0,  10.0,  0.0, 0.25, on_change=clear_results)
+                params["ink_thickness"]       = st.slider("Line thickness",      0,     8,    0,    1,  on_change=clear_results)
 
-        with eff_mid:
             with st.container(border=True):
                 st.markdown('<div class="param-group-label">Luma mix</div>', unsafe_allow_html=True)
-                params["luma_strength"]          = st.slider("Strength",           0.0,  1.0, 1.00, 0.05, on_change=clear_results)
-                params["luma_min_coeff"]         = st.slider("Minimum coefficient", 0.0, 1.0, 0.00, 0.05, on_change=clear_results)
-                params["luma_gamma"]             = st.slider("Coefficient gamma",  0.20, 3.00, 1.00, 0.05, on_change=clear_results)
-                params["luma_coeff_blur_sigma"]  = st.slider("Coefficient blur σ", 0.0, 12.0,  0.0, 0.25, on_change=clear_results)
+                params["luma_strength"]         = st.slider("Strength",            0.0,  1.0, 1.00, 0.05, on_change=clear_results)
+                params["luma_min_coeff"]        = st.slider("Minimum coefficient", 0.0,  1.0, 0.00, 0.05, on_change=clear_results)
+                params["luma_gamma"]            = st.slider("Coefficient gamma",  0.20, 3.00, 1.00, 0.05, on_change=clear_results)
+                params["luma_coeff_blur_sigma"] = st.slider("Coefficient blur σ",  0.0, 12.0,  0.0, 0.25, on_change=clear_results)
 
         with eff_right:
             with st.container(border=True):
-                st.markdown('<div class="param-group-label">Watershed — regions</div>', unsafe_allow_html=True)
-                params["watershed_marker_spacing"]    = st.slider("Marker spacing (px)", 4, 160, 36, 1,   on_change=clear_results)
-                params["watershed_gradient_smoothing"] = st.slider("Gradient σ",        0.0, 8.0, 1.3, 0.1, on_change=clear_results)
-                params["watershed_region_color_mode"] = st.selectbox(
-                    "Region color",
+                st.markdown('<div class="param-group-label">Segmentation (Watershed mode)</div>', unsafe_allow_html=True)
+
+                seg_method = st.selectbox(
+                    "Method",
+                    SEGMENTATION_METHODS,
+                    index=0,
+                    key="segmentation_method",
+                    on_change=clear_results,
+                    help=(
+                        "Watershed: gradient-based flood from markers.\n"
+                        "K-means: color clustering in RGB space (scipy).\n"
+                        "SLIC: compact superpixels via color+spatial proximity (scikit-image).\n"
+                        "Felzenszwalb: graph-based merge by internal variation (scikit-image).\n"
+                        "Mean-shift: mode-seeking density estimation on downsampled image (scikit-learn)."
+                    ),
+                )
+                params["segmentation_method"] = seg_method
+
+                # ── Shared boundary controls (all methods) ──────────────────
+                st.markdown('<div class="param-group-label" style="margin-top:0.6rem">Region color</div>', unsafe_allow_html=True)
+                params["seg_region_color_mode"] = st.selectbox(
+                    "Color mode",
                     ["Random pixel", "Mean color", "Median color"],
                     index=0,
                     on_change=clear_results,
+                    help="Random pixel avoids grey convergence on noise-like images.",
                 )
-                params["watershed_random_seed"] = st.number_input(
+                params["seg_random_seed"] = st.number_input(
                     "Random seed", min_value=0, max_value=999999, value=12345, step=1, on_change=clear_results,
                 )
 
-            with st.container(border=True):
-                st.markdown('<div class="param-group-label">Watershed — boundaries</div>', unsafe_allow_html=True)
-                params["watershed_boundary_style"]       = st.selectbox("Style", ["None", "Black", "Local mean"], index=0, on_change=clear_results)
-                params["watershed_boundary_thickness"]   = st.slider("Thickness",    0,  8, 0, 1, on_change=clear_results)
-                params["watershed_boundary_mean_window"] = st.slider("Mean window",  3, 21, 5, 2, on_change=clear_results)
+                st.markdown('<div class="param-group-label" style="margin-top:0.6rem">Boundaries</div>', unsafe_allow_html=True)
+                params["seg_boundary_style"]       = st.selectbox("Style",     ["None", "Black", "Local mean"], index=0, on_change=clear_results)
+                params["seg_boundary_thickness"]   = st.slider("Thickness (px)",  0,  8, 0, 1, on_change=clear_results)
+                params["seg_boundary_mean_window"] = st.slider("Mean window (px)", 3, 21, 5, 2, on_change=clear_results)
+
+                # ── Method-specific parameters ───────────────────────────────
+                if seg_method == "Watershed":
+                    st.markdown('<div class="param-group-label" style="margin-top:0.6rem">Watershed</div>', unsafe_allow_html=True)
+                    params["watershed_marker_spacing"]     = st.slider("Marker spacing (px)", 4, 160, 36,  1,   on_change=clear_results)
+                    params["watershed_gradient_smoothing"] = st.slider("Gradient σ",         0.0, 8.0, 1.3, 0.1, on_change=clear_results)
+                    # Mirror to shared keys so the helper picks them up
+                    params["watershed_region_color_mode"]  = params["seg_region_color_mode"]
+                    params["watershed_random_seed"]        = params["seg_random_seed"]
+                    params["watershed_boundary_style"]     = params["seg_boundary_style"]
+                    params["watershed_boundary_thickness"] = params["seg_boundary_thickness"]
+                    params["watershed_boundary_mean_window"] = params["seg_boundary_mean_window"]
+
+                elif seg_method == "K-means":
+                    st.markdown('<div class="param-group-label" style="margin-top:0.6rem">K-means</div>', unsafe_allow_html=True)
+                    params["kmeans_k"] = st.slider("Number of clusters k", 10, 400, 120, 5, on_change=clear_results)
+
+                elif seg_method == "SLIC":
+                    if not SKIMAGE_AVAILABLE:
+                        st.warning("scikit-image not installed — will fall back to K-means.", icon="⚠️")
+                    st.markdown('<div class="param-group-label" style="margin-top:0.6rem">SLIC</div>', unsafe_allow_html=True)
+                    params["slic_n_segments"]   = st.slider("Target segments",  10, 400, 120,  5,   on_change=clear_results)
+                    params["slic_compactness"]  = st.slider("Compactness",      0.1, 50.0, 10.0, 0.5, on_change=clear_results,
+                                                            help="Higher = more square superpixels; lower = more color-following.")
+                    params["slic_sigma"]        = st.slider("Pre-smoothing σ",  0.0,  5.0,  1.0, 0.1, on_change=clear_results)
+
+                elif seg_method == "Felzenszwalb":
+                    if not SKIMAGE_AVAILABLE:
+                        st.warning("scikit-image not installed — will fall back to K-means.", icon="⚠️")
+                    st.markdown('<div class="param-group-label" style="margin-top:0.6rem">Felzenszwalb</div>', unsafe_allow_html=True)
+                    params["felz_scale"]    = st.slider("Scale (region size)",    1.0, 500.0, 100.0, 5.0, on_change=clear_results,
+                                                        help="Larger = fewer, larger regions. Number of regions is automatic.")
+                    params["felz_sigma"]    = st.slider("Pre-smoothing σ",        0.0,   3.0,   0.8, 0.1, on_change=clear_results)
+                    params["felz_min_size"] = st.slider("Minimum region size (px)", 1,   200,    20,   1,  on_change=clear_results)
+
+                elif seg_method == "Mean-shift":
+                    if not SKLEARN_AVAILABLE:
+                        st.warning("scikit-learn not installed — will fall back to K-means.", icon="⚠️")
+                    st.markdown('<div class="param-group-label" style="margin-top:0.6rem">Mean-shift</div>', unsafe_allow_html=True)
+                    params["meanshift_bandwidth"] = st.slider(
+                        "Bandwidth (0 = auto)",  0.0, 100.0, 0.0, 1.0, on_change=clear_results,
+                        help="Search window radius in RGB space. 0 = estimated automatically.",
+                    )
+                    params["meanshift_max_side"] = st.slider(
+                        "Downsample max side (px)", 16, 128, 64, 8, on_change=clear_results,
+                        help="Image is downsampled before clustering to keep computation tractable.",
+                    )
 
     # ── Tab 5 · Features ──────────────────────────────────────────────────────
     with tab_features:
@@ -2578,6 +2894,7 @@ def render_app_tab() -> None:
                     if st.session_state.audio_bytes != def_bytes:
                         st.session_state.audio_bytes = def_bytes
                         st.session_state.using_default = True
+                        st.session_state.audio_filename = DEFAULT_AUDIO_TITLE
                         st.session_state.last_audio_context = None
                         st.session_state.results = None
                         st.rerun()
@@ -2604,6 +2921,7 @@ def render_app_tab() -> None:
                     if st.session_state.audio_bytes != uploaded_bytes:
                         st.session_state.audio_bytes = uploaded_bytes
                         st.session_state.using_default = False
+                        st.session_state.audio_filename = uploaded_file.name
                         st.session_state.last_audio_context = None
                         st.session_state.results = None
                         st.rerun()
@@ -2629,6 +2947,7 @@ def render_app_tab() -> None:
                         if st.session_state.audio_bytes != recorded_bytes:
                             st.session_state.audio_bytes = recorded_bytes
                             st.session_state.using_default = False
+                            st.session_state.audio_filename = "recording.wav"
                             st.session_state.last_audio_context = None
                             st.session_state.results = None
                             st.rerun()
@@ -2648,7 +2967,7 @@ def render_app_tab() -> None:
                     st.session_state.using_default = False
 
         st.button(
-            "▶  Generate image",
+            "▶  GENERATE IMAGE",
             type="primary",
             width="stretch",
             disabled=(st.session_state.audio_bytes is None or st.session_state.run_in_progress),
@@ -2692,7 +3011,7 @@ def render_app_tab() -> None:
                 st.download_button(
                     "⬇  Download PNG",
                     data=results["png_bytes"],
-                    file_name="audio_image.png",
+                    file_name=build_download_filename(st.session_state.get("audio_filename")),
                     mime="image/png",
                     width="stretch",
                 )
@@ -2753,9 +3072,9 @@ def render_app_tab() -> None:
             k_max_runtime = compute_max_sections(len(waveform), target_size)
             n_sections_runtime = 1 if section_layout == "None" else min(max(1, int(n_sections)), k_max_runtime)
 
-            def update_progress(done: int, total: int) -> None:
+            def update_progress(label: str, done: int, total: int) -> None:
                 percent = int(round(100.0 * done / max(1, total)))
-                progress_status_placeholder.info(f"Computing section {done}/{total} — {percent}%")
+                progress_status_placeholder.info(f"{label} — {percent}%")
                 progress_bar.progress(percent)
 
             with st.spinner("Generating section-by-section image…"):
