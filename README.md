@@ -13,256 +13,214 @@ short_description: Turn audio into images with inverse spectral synthesis
 
 # Audio Visualization
 
-This repository contains an interactive Streamlit mini app that converts an audio signal into a square image using classical signal-processing operations.
+Audio Visualization is an interactive Streamlit application that converts an audio signal into a square image using deterministic signal-processing operations.
 
-The app is designed as an educational and portfolio demo at the intersection of audio analysis, Fourier-domain synthesis, image generation and segmentation. It does not use a trained model. Instead, it extracts deterministic audio descriptors, maps them to the magnitude and phase of a synthetic 2D Fourier spectrum, applies Hermitian symmetry, and reconstructs an image with a 2D inverse Fourier transform.
+The project is not based on a trained generative model. Instead, it extracts audio descriptors, maps them to the magnitude and phase of a synthetic 2D Fourier spectrum, enforces Hermitian symmetry, and reconstructs an image with a 2D inverse Fourier transform.
 
-The main idea is to treat the audio signal as a source of spectral and temporal structure, then use that structure to build an image:
+When the same audio and the same parameters are used, the generated image is always the same.
 
-```text
-Input audio
-|
-+-- Audio feature extraction
-|   +-- multi-resolution STFT
-|   +-- continuous wavelet transform
-|   +-- mel spectrogram
-|   +-- chroma
-|   +-- MFCC
-|   +-- temporal descriptors
-|
-+-- 2D Fourier spectrum construction
-|   +-- magnitude grid
-|   +-- phase grid
-|   +-- Hermitian symmetrization
-|
-+-- 2D inverse Fourier transform
-|
-+-- Output rendering
-    +-- grayscale image
-    +-- RGB spectral image
-    +-- black drawing overlay
-    +-- luminance-modulated color image
-    +-- watershed-style segmented image
-```
+## Live app
 
-When the parameters are fixed, the same audio always produces the same image.
+Streamlit app: <https://audio-visualization.streamlit.app>
 
-## Main features
+Portfolio: <https://share.streamlit.io/user/trungtin-dinh>
 
-- Load the default open-source audio sample.
-- Upload a personal audio file.
-- Record audio directly from the browser when supported by Streamlit.
-- Display a waveform preview of the loaded signal.
-- Generate a square image from audio features using inverse 2D spectral synthesis.
-- Use multi-resolution STFT, CWT, mel spectrogram, chroma, MFCC, RMS, onset strength, spectral centroid and zero-crossing rate.
-- Build separate 2D Fourier magnitude and phase grids from audio descriptors.
-- Enforce Hermitian symmetry before applying `ifft2`, so the reconstructed image is real-valued.
-- Choose several output modes: `Grayscale`, `Colors`, `Black mix`, `Luma mix` and `Watershed`.
-- Split the audio into chronological sections and arrange them with several spatial layouts.
-- Adjust advanced synthesis, rendering, RGB, segmentation and post-processing parameters.
-- Export the generated image as PNG.
-- Read the English and French documentation tabs.
+Source code: <https://github.com/trungtin-dinh/audio_visualization>
 
-## Method overview
+## What the app does
 
-The application is based on the following spectral synthesis model:
+The app takes an input audio signal and transforms its temporal, spectral and perceptual structure into a visual representation.
+
+It supports:
+
+- default open-source audio sample;
+- user audio upload;
+- browser audio recording, when supported by Streamlit;
+- waveform and spectrogram preview;
+- deterministic audio-to-image generation;
+- several output modes, from grayscale reconstruction to colored and segmented renderings;
+- export of the generated image as a PNG file;
+- integrated English and French documentation.
+
+The goal is not to recognize speech, classify music or generate a realistic photograph. The goal is to build an interpretable visual object from measurable audio features.
+
+## Processing pipeline
 
 ```text
-x[n]
-|
-+-- feature extraction
-|
-+-- grid construction
-|   +-- M_tilde[u, v]      magnitude grid
-|   +-- Phi_tilde[u, v]    phase grid
-|
-+-- complex spectrum
-|   Z[u, v] = M_tilde[u, v] exp(j Phi_tilde[u, v])
-|
-+-- Hermitian projection
-|   Z_sym[u, v] = (Z[u, v] + conj(Z[-u, -v])) / 2
-|
-+-- image reconstruction
-    f[x, y] = Re(IFFT2(Z_sym))
+Input audio signal
+        |
+        v
+Audio feature extraction
+        |
+        +-- multi-resolution STFT
+        +-- continuous wavelet transform
+        +-- mel spectrogram
+        +-- chroma
+        +-- MFCC
+        +-- RMS energy
+        +-- onset strength
+        +-- spectral centroid
+        +-- zero-crossing rate
+        |
+        v
+2D Fourier spectrum construction
+        |
+        +-- magnitude grid
+        +-- phase grid
+        +-- Hermitian symmetrization
+        |
+        v
+2D inverse Fourier transform
+        |
+        v
+Output rendering
+        |
+        +-- grayscale image
+        +-- RGB spectral image
+        +-- black drawing overlay
+        +-- luminance-modulated color image
+        +-- segmented image
 ```
 
-The magnitude grid controls how much each spatial sinusoidal component contributes to the output image. The phase grid controls where those components are positioned. Since phase is crucial for spatial structure, the app gives direct control over the phase feature weights.
+## Core idea
 
-## Audio feature extraction
+A real-valued image can be described by its 2D discrete Fourier transform. Each Fourier coefficient controls one spatial sinusoidal component. Its magnitude controls the strength of that component, while its phase controls where the component is positioned in the image.
 
-The input waveform is decoded as mono audio and processed at its original sample rate. The feature extraction stage combines several complementary representations.
+This app builds the process in reverse.
 
-### Multi-resolution STFT
-
-Several STFT window lengths are used at the same time. Short windows capture transients and fast events, while long windows capture more precise harmonic frequency structure.
-
-The STFT coefficient is:
+The input audio signal is first transformed into several time-frequency and temporal descriptors. These descriptors are resized to the target image size and mixed into two grids:
 
 ```text
-X_Nk[m,t] = sum_n x[n + tH_k] w[n] exp(-j 2 pi m n / N_k)
+M_tilde[u, v]      magnitude grid
+Phi_tilde[u, v]   phase grid
 ```
 
-The magnitude of the STFT contributes to the Fourier magnitude grid. The unwrapped phase of selected STFT resolutions contributes to the Fourier phase grid.
-
-### Continuous Wavelet Transform
-
-The CWT adds a constant-Q representation. It gives finer temporal resolution at high frequencies and finer frequency resolution at low frequencies.
-
-The app supports:
-
-- `Morlet`, which provides both CWT magnitude and instantaneous phase;
-- `Ricker (Mexican hat)`, which provides magnitude only.
-
-### Perceptual and temporal descriptors
-
-The app also uses:
-
-- mel spectrogram for perceptually weighted spectral energy;
-- chroma for pitch-class and harmonic content;
-- MFCC for spectral envelope information;
-- RMS for loudness dynamics;
-- spectral centroid for brightness;
-- onset strength for rhythmic and attack information;
-- zero-crossing rate for noisiness and high-frequency temporal changes.
-
-These descriptors are normalized, interpolated and mixed into the final 2D grids.
-
-## Building the 2D Fourier spectrum
-
-All feature matrices have different shapes because they depend on the signal length, window size, number of scales and hop length. Each feature map is interpolated to the output image size `N x N`.
-
-The magnitude grid is a weighted sum of energy-related descriptors:
+The complex spectrum is then assembled as:
 
 ```text
-M_tilde =
-    w_STFT   M_STFT
-  + w_CWT    M_CWT
-  + w_mel    M_mel
-  + w_chr    C
-  + w_mfcc   |MFCC|
-  + w_RMS    E
+Z[u, v] = M_tilde[u, v] * exp(j * Phi_tilde[u, v])
 ```
 
-The phase grid is a weighted sum of phase-related and temporal descriptors:
+Because the inverse 2D Fourier transform of an arbitrary complex spectrum is generally complex-valued, the spectrum is projected onto the Hermitian-symmetric subspace:
 
 ```text
-Phi_tilde =
-    w_mid       Phi_1024
-  + w_fine      Phi_512
-  + w_cwt       Phi_CWT
-  + w_onset     Phi_onset
-  + w_centroid  Phi_centroid
-  + w_zcr       Phi_ZCR
+Z_sym[u, v] = (Z[u, v] + conj(Z[-u mod N, -v mod N])) / 2
 ```
 
-All weights are user-adjustable and automatically normalized.
-
-## Hermitian symmetry and image reconstruction
-
-A real-valued image has a Fourier spectrum with Hermitian symmetry:
+The final spatial image is reconstructed by:
 
 ```text
-F[u,v] = conj(F[-u mod N, -v mod N])
+f[x, y] = Re(IFFT2(Z_sym))
 ```
 
-The audio-derived spectrum does not naturally satisfy this constraint, so the app projects it onto the Hermitian-symmetric subspace:
+The imaginary part is only numerical floating-point residue after Hermitian symmetrization and is discarded.
 
-```text
-Z_sym[u,v] = (Z[u,v] + conj(Z[-u mod N, -v mod N])) / 2
-```
+## Audio features used
 
-Then the image is reconstructed with:
+The image is driven by complementary audio representations.
 
-```text
-f[x,y] = Re(IFFT2(Z_sym))
-```
+| Feature group | Role in the synthesis |
+|---|---|
+| Multi-resolution STFT magnitude | Spectral energy at several time-frequency resolutions |
+| STFT phase | Main source of spatial phase structure |
+| Continuous wavelet transform | Constant-Q time-frequency representation |
+| Mel spectrogram | Perceptually weighted spectral energy |
+| Chroma | Harmonic and pitch-class information |
+| MFCC | Spectral envelope and timbral shape |
+| RMS energy | Loudness dynamics |
+| Onset strength | Rhythmic attacks and sudden spectral changes |
+| Spectral centroid | Perceptual brightness |
+| Zero-crossing rate | Noisiness and high-frequency temporal activity |
 
-The imaginary part after this operation is only numerical floating-point residue and is discarded.
+The magnitude grid mainly uses energy-related descriptors. The phase grid mainly uses phase and temporal descriptors, because phase has a strong effect on the spatial organization of the reconstructed image.
 
 ## Output modes
 
+The app provides several rendering modes.
+
 ### Grayscale
 
-A single full-band magnitude and phase pair is constructed. The reconstructed channel is repeated over R, G and B.
+A single full-band spectrum is reconstructed. The result is repeated over the red, green and blue channels.
 
 ### Colors
 
-The frequency axis is split into three bands:
+The frequency axis is split into low, mid and high bands. Each band is reconstructed independently and assigned to one RGB channel.
 
 ```text
-R channel -> low-frequency band
-G channel -> mid-frequency band
-B channel -> high-frequency band
+Low frequencies   -> red channel
+Mid frequencies   -> green channel
+High frequencies  -> blue channel
 ```
-
-Each band is reconstructed independently and then stacked into an RGB image.
 
 ### Black mix
 
-The app computes both `Colors` and `Grayscale`. The grayscale image is binarized with Otsu thresholding, and the selected class is used as a sparse black drawing mask over the color image.
+The app combines the colored image with a binarized grayscale reconstruction. The grayscale image is converted into a sparse black drawing mask using Otsu thresholding.
 
 ### Luma mix
 
-The app computes both `Colors` and `Grayscale`. The grayscale image becomes a luminance coefficient map that multiplicatively modulates the RGB image:
+The grayscale reconstruction is used as a luminance coefficient map that modulates the colored image.
 
 ```text
-I_out[x,y,c] = I_color[x,y,c] * alpha[x,y]
+I_out[x, y, c] = I_color[x, y, c] * alpha[x, y]
 ```
 
-This mode keeps the color texture while using the grayscale reconstruction as a spatial envelope.
+### Watershed / segmented rendering
 
-### Watershed
+The luminance-modulated image can be segmented into connected regions. Each region receives a representative color, and optional boundary rendering can be applied.
 
-The `Luma mix` result is segmented into connected regions. Each region receives a representative color, and the boundary style can be adjusted or disabled.
+The app also exposes other segmentation approaches, including K-means, SLIC, Felzenszwalb and Mean-shift, depending on the installed dependencies.
 
 ## Sectioned synthesis
 
-The app can process the whole audio at once, or divide it into chronological sections. If `k` sections are selected, the waveform is split into `k` nearly equal segments. Each segment generates its own image patch, and all patches are assembled into a final square canvas.
+The app can process the whole audio at once or split it into chronological sections.
 
-The available section layouts are:
+When sectioning is enabled, the waveform is divided into nearly equal temporal segments. Each segment generates its own image patch, and the patches are assembled into a final square canvas.
 
-- `None`;
-- `Chronological treemap`;
-- `Clockwise circular slices`;
-- `Concentric circles`;
-- `Concentric squares`;
-- `Vertical strips`;
-- `Horizontal strips`.
+Available layouts include:
 
-This makes it possible to visualize temporal evolution in the final image. The first section always corresponds to the beginning of the audio, and the last section corresponds to the end.
+- chronological treemap;
+- clockwise circular slices;
+- concentric circles;
+- concentric squares;
+- vertical strips;
+- horizontal strips.
 
-## Post-processing and parameters
+This makes it possible to visualize the temporal evolution of the audio signal inside the final image.
 
-The interface exposes a large set of parameters for detailed experimentation:
+## Main parameters
 
-- output image size;
-- output mode;
-- number of sections;
-- section layout;
-- CWT wavelet type;
-- robust normalization percentiles;
-- contrast, brightness, gamma and saturation;
-- RGB band split and channel balance;
-- Black mix thresholding and mask density;
-- Luma mix strength and coefficient shaping;
-- Watershed marker spacing, boundary style and region coloring;
-- magnitude feature weights;
-- phase feature weights;
-- STFT, CWT, mel and MFCC analysis parameters.
+The interface exposes several groups of parameters.
 
-The default parameters are chosen to produce a stable image without requiring the user to understand all advanced settings. However, exposing these controls makes the app useful as a small experimental lab for audio-driven image synthesis.
+| Group | Examples |
+|---|---|
+| Signal | image size, output mode, section layout, number of sections, CWT wavelet |
+| Rendering | robust percentiles, gamma, contrast, brightness, saturation |
+| Color | RGB band split, per-channel balance, RGB normalization mode |
+| Effects | black mask density, luma strength, segmentation method, boundary style |
+| Features | magnitude weights, phase weights, STFT range, CWT scales, mel bands, MFCC coefficients |
+
+The default settings are chosen to generate a stable result without requiring the user to understand every parameter. Advanced users can still modify the full signal-processing chain.
 
 ## Repository structure
 
 ```text
 .
-├── app_sl.py              # Streamlit app
-├── documentation_en.md    # English documentation
-├── documentation_fr.md    # French documentation
+├── app_sl.py              # Streamlit entry point
+├── ui.py                  # Streamlit interface, session state and layout
+├── audio_io.py            # Audio loading, decoding and default sample handling
+├── features.py            # Audio feature extraction
+├── grids.py               # Magnitude/phase grid construction and Hermitian projection
+├── synthesis.py           # Full audio-to-image synthesis pipeline
+├── segmentation.py        # Segmentation and region-color rendering methods
+├── display.py             # Waveform, spectrogram, Fourier and image display helpers
+├── utils.py               # Shared numerical utilities
+├── config.py              # Constants, defaults and UI options
+├── documentation_en.md    # English technical documentation
+├── documentation_fr.md    # French technical documentation
 ├── requirements.txt       # Python dependencies
-├── packages.txt           # System dependency for audio decoding
-├── LICENSE.txt            # License file
-└── README.md              # Repository and app description
+├── packages.txt           # System packages for deployment
+├── LICENSE.txt            # MIT license
+└── README.md              # Project description
 ```
 
 ## Installation
@@ -280,33 +238,15 @@ Install the Python dependencies:
 pip install -r requirements.txt
 ```
 
-The repository uses:
+The repository also includes a `packages.txt` file for Linux-based online deployments. It contains system-level audio decoding support.
 
-```text
-streamlit
-numpy
-scipy
-librosa
-soundfile
-matplotlib
-scikit-image
-```
-
-The `packages.txt` file includes:
-
-```text
-libsndfile1
-```
-
-This system package is useful for audio file decoding on Streamlit Community Cloud and similar Linux-based deployments.
-
-## Run the Streamlit app locally
+## Run locally
 
 ```bash
 streamlit run app_sl.py
 ```
 
-The local interface will usually be available at:
+The app should then be available at:
 
 ```text
 http://localhost:8501
@@ -314,37 +254,40 @@ http://localhost:8501
 
 ## Deployment notes
 
-This repository is configured as a Streamlit app through the Hugging Face / Spaces-style metadata at the top of this README:
+For Streamlit Community Cloud, use:
 
-```yaml
-sdk: streamlit
-app_file: app_sl.py
+```text
+app_sl.py
 ```
 
-For Streamlit Community Cloud, select `app_sl.py` as the main file.
+as the main file.
+
+The metadata block at the top of this README also makes the repository compatible with Hugging Face Spaces-style Streamlit configuration.
 
 ## Documentation
 
-The repository includes two Markdown documentation files:
+The app includes two documentation tabs and two standalone Markdown files:
 
-- `documentation_en.md` for the English documentation;
-- `documentation_fr.md` for the French documentation.
+- `documentation_en.md`;
+- `documentation_fr.md`.
 
-These files explain the audio feature extraction, 2D Fourier spectrum construction, Hermitian symmetry, output modes, segmentation methods, sectioned synthesis, layout algorithms, post-processing pipeline, parameters and limitations.
+They describe the audio feature extraction, 2D Fourier spectrum construction, Hermitian symmetry, output modes, segmentation methods, sectioned synthesis, layout algorithms, post-processing pipeline, parameters and limitations.
 
-## Notes and limitations
+## Limitations
 
-This app is an educational and artistic visualization system. It does not recognize speech, instruments or musical semantics. It only converts measurable audio descriptors into an image through deterministic signal-processing operations.
+This app is an educational and artistic signal-processing demo. It does not understand the semantic content of the audio signal.
 
-The generated spectrum is not the Fourier transform of a natural image. It is a synthetic spectrum built from audio features. The resulting image is therefore not expected to look like a photograph. Its visual structure comes from the interference of spatial sinusoids whose magnitude and phase were derived from the audio.
+It does not detect words, instruments, genres or musical meaning. It only converts measurable signal descriptors into the magnitude and phase of a synthetic 2D Fourier spectrum.
+
+The generated spectrum is not the Fourier transform of a natural image. It is an artificial spectrum derived from audio features. The output should therefore be interpreted as an audio-driven visual synthesis, not as a photographic reconstruction.
 
 The computational cost increases with:
 
-- the output image size;
-- the number of sections;
-- the CWT maximum sample count;
-- the number of CWT scales;
-- composite modes such as `Black mix`, `Luma mix` and `Watershed`, which run the reconstruction pipeline twice.
+- output image size;
+- number of sections;
+- CWT maximum sample count;
+- number of CWT scales;
+- composite output modes such as `Black mix`, `Luma mix` and segmented rendering.
 
 For online use, moderate image sizes and section counts are recommended.
 
