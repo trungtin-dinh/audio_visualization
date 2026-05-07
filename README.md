@@ -18,7 +18,7 @@ Source code: <https://github.com/trungtin-dinh/audio_visualization>
 
 ![Audio Visualization demo](demo_screenshot.png)
 
-The screenshot above shows the Streamlit interface with the input audio controls, signal-processing parameters, audio analysis plots and generated visual output.
+The screenshot above shows the Streamlit interface with the input audio and generated visual output.
 
 ## What the app does
 
