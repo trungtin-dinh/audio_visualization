@@ -1,3 +1,16 @@
+---
+title: Audio Visualization
+emoji: ""
+colorFrom: blue
+colorTo: gray
+sdk: streamlit
+sdk_version: 1.36.0
+app_file: app_sl.py
+pinned: false
+license: mit
+short_description: Convert audio into abstract images with Fourier-based signal processing
+---
+
 # Audio Visualization
 
 Audio Visualization is an interactive Streamlit application that converts an audio signal into a square image using deterministic signal-processing operations.
@@ -13,6 +26,12 @@ Streamlit app: <https://audio-visualization.streamlit.app>
 Portfolio: <https://share.streamlit.io/user/trungtin-dinh>
 
 Source code: <https://github.com/trungtin-dinh/audio_visualization>
+
+## Demo
+
+![Audio Visualization demo](demo_screenshot.png)
+
+The screenshot above shows the Streamlit interface with the input audio controls, signal-processing parameters, audio analysis plots and generated visual output.
 
 ## What the app does
 
@@ -206,6 +225,7 @@ The default settings are chosen to generate a stable result without requiring th
 ├── documentation_fr.md    # French technical documentation
 ├── requirements.txt       # Python dependencies
 ├── packages.txt           # System packages for deployment
+├── demo_screenshot.png    # Screenshot displayed in this README
 ├── LICENSE.txt            # MIT license
 └── README.md              # Project description
 ```
