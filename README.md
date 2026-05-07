@@ -1,16 +1,3 @@
----
-title: Audio Visualization
-emoji: ""
-colorFrom: blue
-colorTo: gray
-sdk: streamlit
-sdk_version: 1.36.0
-app_file: app_sl.py
-pinned: false
-license: mit
-short_description: Convert audio into abstract images with Fourier-based signal processing
----
-
 # Audio Visualization
 
 Audio Visualization is an interactive Streamlit application that converts an audio signal into a square image using deterministic signal-processing operations.
