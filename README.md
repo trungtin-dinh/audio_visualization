@@ -1,3 +1,5 @@
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/trungtin-dinh/audio_visualization)
+
 # Audio Visualization
 
 Audio Visualization is an interactive Streamlit application that converts an audio signal into a square image using deterministic signal-processing operations.
